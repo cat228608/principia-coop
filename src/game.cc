@@ -17,6 +17,7 @@
 #include "fxemitter.hh"
 #include "game-message.hh"
 #include "gravityman.hh"
+#include "multiplayer.hh"
 #include "grid.hh"
 #include "group.hh"
 #include "gui.hh"
@@ -232,8 +233,6 @@ GLuint trans_program_shift_loc;
 GLuint trans_program_scale_loc;
 GLuint trans_program_pos_loc;
 GLuint trans_program_poslower_loc;
-GLuint trans_program_up_loc;
-GLuint trans_program_xyratio_loc;
 
 static void deactive_misc_wdg(panel::widget **wdg) {
     tms_debugf("DEACTIVATE");
@@ -1083,8 +1082,6 @@ void game::init_shaders() {
     trans_program_shift_loc = tms_program_get_uniform(trans_program, "texcoord_trans");
     trans_program_pos_loc = tms_program_get_uniform(trans_program, "position_trans");
     trans_program_poslower_loc = tms_program_get_uniform(trans_program, "position_trans_lower");
-    trans_program_up_loc = tms_program_get_uniform(trans_program, "up");
-    trans_program_xyratio_loc = tms_program_get_uniform(trans_program, "xyratio");
 
     sh = tms_shader_read("postprocess");
     prg_output = tms_shader_get_program(sh, TMS_NO_PIPELINE);
@@ -1276,7 +1273,7 @@ int game::resume() {
         this->create_level(level_type, this->resume_action == GAME_RESUME_NEW_EMPTY, false);
 
         if (!settings["hide_tips"]->v.b) {
-            ui::open_dialog(DIALOG_SANDBOX_TIPS);
+            ui::open_sandbox_tips();
         }
     }
 
@@ -1483,6 +1480,9 @@ int game::step(double dt) {
     }
 
     this->wm->step();
+
+    /* co-op: pump the network and the lower-left message log */
+    mp::step();
 
     /*
     if (this->state.time_mul > 0.f) {
@@ -2706,10 +2706,7 @@ int game::render() {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         } else if (material_factory::background_id == BG_SPACE || material_factory::background_id == BG_OUTDOOR) {
             tms_assertf((ierr = glGetError()) == 0, "gl error %d in game::render before space bg", ierr);
-            if (_tms.gamma_correct)
-                glClearColor(0.001214f, 0.003347f, 0.006512f, 1.f);
-            else
-                glClearColor(4.f/255.f, 11.f/255.f, 19.f/255.f, 1.f);
+            glClearColor(4.f/255.f, 11.f/255.f, 19/255.f, 1.f);
             glClear(GL_DEPTH_BUFFER_BIT|GL_COLOR_BUFFER_BIT);
             glDisable(GL_CULL_FACE);
             glDisable(GL_DEPTH_TEST);
@@ -2725,7 +2722,6 @@ int game::render() {
 
                 float ff = this->cam->p_far;
                 float nn = this->cam->p_near;
-                tvec3 uu = this->cam->up;
 
 #define HORIZON_DIST 2500.f
 
@@ -2745,14 +2741,9 @@ int game::render() {
                 glUniform2f(trans_program_shift_loc, 0.f,0* (this->cam->_position.y > 0? .01f : .075f) * this->cam->_position.y);
                 glUniform2f(trans_program_pos_loc, 0.f, pp);
                 glUniform2f(trans_program_poslower_loc, 0.f, pp);
-                glUniform2f(trans_program_up_loc, -uu.x, uu.y);
-                glUniform1f(trans_program_xyratio_loc, this->cam->width / this->cam->height);
                 tms_fb_render(&fb, trans_program);
 
                 //fb.fb_texture[0][0] = tex_bedrock->gl_texture;
-
-                this->cam->up = tvec3f(0,1,0);
-                this->cam->calculate();
 
                 v1 = tms_camera_project(this->cam, this->cam->_position.x, -1.f, -.5f);
                 float pp2 = (v1.y / this->cam->height) * 2.f;
@@ -2761,12 +2752,7 @@ int game::render() {
                 glUniform2f(trans_program_shift_loc, 0.f,0* (this->cam->_position.y > 0? .01f : .075f) * this->cam->_position.y);
                 glUniform2f(trans_program_pos_loc, 0.f, pp2-2.f);
                 glUniform2f(trans_program_poslower_loc, 0.f, pp);
-                glUniform2f(trans_program_up_loc, -uu.x, uu.y);
-                glUniform1f(trans_program_xyratio_loc, this->cam->width / this->cam->height);
                 tms_fb_render(&fb, trans_program);
-
-                this->cam->up = uu;
-                this->cam->calculate();
             } else {
                 tms_texture_render(tex_bg);
             }
@@ -5128,6 +5114,11 @@ void game::init_background() {
 static bool just_paused = false;
 
 void game::do_pause() {
+    /* co-op: going back to build mode (B, the pause widget, the quit
+     * confirmation, ...) ends the round for everybody, so it has to wait
+     * until every player asked for it. */
+    if (mp::request_stop()) return;
+
     W->save_cache(W->level_id_type, W->level.local_id);
 
     if (!settings["touch_controls"]->v.b)
@@ -6697,6 +6688,22 @@ void game::create_level(int type, bool empty, bool play) {
         sprintf(W->level.name, "Random Adventure");
         W->level.name_len = strlen("Random Adventure");
     }
+}
+
+void game::coop_create_level(uint64_t seed) {
+    tms_infof("co-op: creating an Adventure level with seed 0x%016llx",
+            (unsigned long long)seed);
+
+    this->reset();
+    this->state.sandbox = true;
+    this->state.test_playing = false;
+    this->state.puzzle_state = 0;
+
+    W->create(LCAT_ADVENTURE, seed, false);
+
+    this->apply_level_properties();
+    this->add_entities(&W->all_entities, &W->groups, &W->connections, &W->cables);
+    W->begin();
 }
 
 void game::open_state(int id_type, uint32_t id, uint32_t save_id) {
@@ -8587,35 +8594,41 @@ void game::check_select_object(int x, int y, int pid) {
         entity *e = this->sel_p_ent;
 
         switch (this->selection.e_saved->g_id) {
-            case O_LUASCRIPT: {
-                down[pid] = false;
-                char msg[2048];
+            case O_LUASCRIPT:
+                {
+                    down[pid] = false;
+                    char msg[2048];
 
-                if (this->sel_p_ent) {
-                    entity *e = this->sel_p_ent;
-                    snprintf(msg, 2047,
-                        "Name: %s\n"
-                        "ID: %u\n"
-                        "Type ID (g_id): %u\n"
-                        "Position: x: %.2f, y: %.2f\n"
-                        "Angle: %.2f",
-                        e->get_name(), e->id,e->g_id,
-                        e->get_position().x, e->get_position().y,
-                        e->get_angle());
-                } else {
-                    tvec3 p;
-                    W->get_layer_point(this->cam, x, y, 0, &p);
-                    snprintf(msg, 2047,
-                        "No entity selected.\n\n"
-                        "Click position: %.2f/%.2f\n",
-                        p.x, p.y);
+                    if (this->sel_p_ent) {
+                        entity *e = this->sel_p_ent;
+                        snprintf(msg, 2047,
+                                      "Name: %s\n"
+                                      "ID: %u\n"
+                                      "Type ID (g_id): %u\n"
+                                      "Position: %.2f/%.2f\n"
+                                      "Angle: %.2f\n",
+                                      e->get_name(),
+                                      e->id,
+                                      e->g_id,
+                                      e->get_position().x, e->get_position().y,
+                                      e->get_angle()
+                                );
+                    } else {
+                        tvec3 p;
+                        W->get_layer_point(this->cam, x, y, 0, &p);
+                        snprintf(msg, 2047,
+                                      "No entity selected.\n"
+                                      "Click position: %.2f/%.2f\n",
+                                      p.x, p.y
+                                );
+                    }
+
+                    ui::alert(msg);
+                    this->selection.load();
+                    this->set_mode(GAME_MODE_DEFAULT);
+
                 }
-
-                ui::alert(msg);
-                this->selection.load();
-                this->set_mode(GAME_MODE_DEFAULT);
                 break;
-            }
 
             case O_RC_ACTIVATOR:
                 {
@@ -9469,6 +9482,9 @@ void game::damage_interactive(entity *e, b2Fixture *f, void *udata2, float dmg, 
 }
 
 void game::damage_tpixel(entity *e, b2Fixture *f, void *udata2, float dmg, const b2Vec2 &world_point, damage_type dmg_type) {
+    if (mp::is_client() && mp::session_playing())
+        return;
+
     struct tpixel_desc *desc = (struct tpixel_desc *)udata2;
 
     bool do_fadeout = false;
@@ -9622,6 +9638,8 @@ void game::damage_tpixel(entity *e, b2Fixture *f, void *udata2, float dmg, const
                     /* remerge the chunk to fill in the holes */
                     c->merge(desc->get_local_x(), desc->get_local_y(), layer, desc->get_local_x()+(1<<desc->size), desc->get_local_y()+(1<<desc->size), layer+1);
                     W->to_be_reloaded.insert(c);
+
+                    mp::on_terrain_pixel(c->pos_x, c->pos_y, layer, real_x, real_y);
                 }
                 break;
         }
@@ -9849,6 +9867,9 @@ entity *game::editor_construct_entity(uint32_t g_id, int pid, bool force_on_pid,
     } else {
         this->selection.select(e, NULL, (tvec2){0,0}, 0, false);
     }
+
+    /* co-op: tell the other players about the new object */
+    mp::on_local_spawn(e);
 
     if ((int)e->g_id != this->recent[0]) {
         int p = -1;

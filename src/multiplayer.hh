@@ -29,7 +29,7 @@ class principia_wdg;
 
 namespace tms { class surface; }
 
-#define MP_PROTOCOL_VERSION   18   /* 18: mining in the input packet */
+#define MP_PROTOCOL_VERSION   19   /* 19: terrain pixels, ladder up/down */
 #define MP_DEFAULT_PORT       7777
 #define MP_MAX_PLAYERS        8
 #define MP_ID_BLOCK           2000000u   /* entity id range per player */
@@ -80,6 +80,7 @@ enum {
     MSG_PLAYERS,        /* s->c: real player count */
     MSG_REQUEST_AVATARS,/* c->s: 'I do not know which robot is mine' */
     MSG_TOOL,           /* s->c: robot id, equipped tool, equipped weapon */
+    MSG_TERRAIN,        /* s->c: chunk x/y, layer, pixel x/y destroyed */
 };
 
 #define MP_STATE_INTERVAL     0.033   /* seconds between state batches */
@@ -134,10 +135,12 @@ struct input_state {
     float  aim;        /* weapon arm angle, so remote players can aim */
     bool   mining;     /* zapper beam held on the terrain */
     float  mine_x, mine_y;
+    bool   up, down;   /* held up/down: ladders */
 
     input_state() : move_dir(0), look_dir(1), layer_req(0), jump(false),
                     attack(false), action(false), aim(0.f),
-                    mining(false), mine_x(0.f), mine_y(0.f) {}
+                    mining(false), mine_x(0.f), mine_y(0.f),
+                    up(false), down(false) {}
 
     bool differs(const input_state &o) const {
         float da = this->aim - o.aim;
@@ -150,6 +153,7 @@ struct input_state {
             || this->attack != o.attack
             || this->action != o.action
             || this->mining != o.mining
+            || this->up != o.up || this->down != o.down
             || (this->mining && (std::fabs(this->mine_x - o.mine_x) > 0.05f
                               || std::fabs(this->mine_y - o.mine_y) > 0.05f))
             || da > 0.01f;
@@ -286,6 +290,9 @@ void on_world_reset();
 void on_world_teardown();
 void on_runtime_spawn(entity *e);
 void on_runtime_remove(entity *e);
+/* host: a terrain pixel of a chunk was destroyed (chunk terrain is not made
+ * of entities, so it never goes through on_runtime_remove) */
+void on_terrain_pixel(int cx, int cy, int layer, int x, int y);
 
 /**
  * The chunk window is about to load/unload procedural terrain, or is done

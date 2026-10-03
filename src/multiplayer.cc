@@ -1225,7 +1225,9 @@ static input_state read_local_input() {
 
     if (in.move_dir) in.look_dir = in.move_dir;
 
-    in.jump   = ks[SDL_SCANCODE_SPACE] || ks[SDL_SCANCODE_W] || ks[SDL_SCANCODE_UP];
+    in.jump   = ks[SDL_SCANCODE_SPACE];
+    in.up     = ks[SDL_SCANCODE_W] || ks[SDL_SCANCODE_UP];
+    in.down   = ks[SDL_SCANCODE_S] || ks[SDL_SCANCODE_DOWN];
     in.attack = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL] || ks[SDL_SCANCODE_F];
     in.action = ks[SDL_SCANCODE_E];
 
@@ -1262,7 +1264,8 @@ static input_state read_local_input() {
         if (ae && ae->is_creature()) {
             creature *ac = static_cast<creature*>(ae);
 
-            if (ac->get_weapon()) in.aim = ac->get_aim();
+            if (ac->get_weapon()) in.aim = ac->get_weapon()->get_arm_angle();
+            if (ac->look_dir) in.look_dir = (int8_t)ac->look_dir;
         }
     }
 
@@ -1473,6 +1476,65 @@ static void host_remote_mine(creature *c, const input_state &in) {
     }
 }
 
+struct terrain_px { int32_t cx, cy; uint8_t layer, x, y; };
+static std::vector<terrain_px> _terrain_pending;
+
+static bool apply_terrain_px(const terrain_px &t) {
+    if (!W || !W->cwindow) return false;
+    if (t.layer > 2 || t.x > 15 || t.y > 15) return true; /* garbage: drop */
+
+    level_chunk *c = W->cwindow->get_chunk(t.cx, t.cy, true);
+    if (!c) return false; /* not loaded here yet: retry later */
+
+    if (!c->pixels[t.layer][t.y][t.x]) return true; /* already gone */
+
+    int z = t.layer;
+    int lx = t.x, ly = t.y, sz = 1;
+    int limit = std::min(16*16, (int)c->num_merged[z]);
+
+    for (int m = 0; m < limit; ++m) {
+        tpixel_desc &d = c->merged[z][m];
+        if (d.hp <= 0.f) continue;
+
+        int dx = d.get_local_x(), dy = d.get_local_y(), ds = 1 << d.size;
+        if (t.x >= dx && t.x < dx + ds && t.y >= dy && t.y < dy + ds) {
+            d.hp = -1.f;
+            if (m < c->min_merged[z]) c->min_merged[z] = m;
+            lx = dx; ly = dy; sz = ds;
+            break;
+        }
+    }
+
+    c->pixels[z][t.y][t.x] = 0;
+    c->merge(lx, ly, z, lx + sz, ly + sz, z + 1);
+    W->to_be_reloaded.insert(c);
+    return true;
+}
+
+static void process_terrain_pending() {
+    if (_terrain_pending.empty() || mode != MODE_CLIENT) return;
+
+    std::vector<terrain_px> keep;
+    for (size_t x = 0; x < _terrain_pending.size(); ++x)
+        if (!apply_terrain_px(_terrain_pending[x]))
+            keep.push_back(_terrain_pending[x]);
+
+    if (keep.size() > 20000) keep.erase(keep.begin(), keep.begin() + (keep.size() - 20000));
+    _terrain_pending.swap(keep);
+}
+
+void on_terrain_pixel(int cx, int cy, int layer, int x, int y) {
+    if (mode != MODE_HOST || applying || !_session_playing) return;
+
+    buf b;
+    b.w_i32(cx);
+    b.w_i32(cy);
+    b.w_u8((uint8_t)layer);
+    b.w_u8((uint8_t)x);
+    b.w_u8((uint8_t)y);
+    broadcast(MSG_TERRAIN, b);
+}
+
 static void apply_input(uint32_t avatar_id, const input_state &in, input_state *prev) {
     if (!W || !avatar_id) return;
 
@@ -1486,16 +1548,35 @@ static void apply_input(uint32_t avatar_id, const input_state &in, input_state *
 
     /* remote players aim on their own machine; our own robot is aimed by the
      * game itself, so it must not be overridden here */
-    if (avatar_id != _local_avatar) {
-        if (c->get_weapon()) c->get_weapon()->set_arm_angle_raw(in.aim);
-        else c->aim(in.aim);
-    }
+    bool remote = (avatar_id != _local_avatar);
+
+    /* in.aim is the raw arm angle of the owner's weapon - the old code mixed
+     * it with get_aim(), a different value, so the arm jumped between two
+     * angles every frame */
+    if (remote && c->get_weapon()) c->get_weapon()->set_arm_angle_raw(in.aim);
 
     if (in.move_dir) {
         c->move((int)in.move_dir);
-        c->look((int)in.move_dir);
+        if (!remote) c->look((int)in.move_dir);
     } else {
         c->stop();
+    }
+
+    /* the owner's robot faces the mouse, not only the walking direction */
+    if (remote) {
+        int want = in.look_dir ? (int)in.look_dir : (int)in.move_dir;
+        if (want && c->look_dir != want) c->look(want, true);
+    }
+
+    /* ladders: the game itself does move(DIR_UP/DOWN) for the host's own
+     * robot; a remote robot used to get a jump instead, which threw it off
+     * the ladder every time the client pressed up */
+    if (avatar_id != _local_avatar) {
+        bool pu = prev && prev->up, pd = prev && prev->down;
+        if (in.up && !pu) c->move(DIR_UP);
+        else if (!in.up && pu) c->stop_moving(DIR_UP);
+        if (in.down && !pd) c->move(DIR_DOWN);
+        else if (!in.down && pd) c->stop_moving(DIR_DOWN);
     }
 
     if (in.jump && (!prev || !prev->jump)) {
@@ -1706,6 +1787,8 @@ static void send_local_input() {
     b.w_bool(in.mining);
     b.w_f(in.mine_x);
     b.w_f(in.mine_y);
+    b.w_bool(in.up);
+    b.w_bool(in.down);
 
     broadcast(MSG_INPUT, b);
 
@@ -1767,7 +1850,7 @@ static void send_state_batch(std::vector<entity*> &v) {
 
             /* animation details */
             b.w_f(c->get_max_hp());
-            b.w_f(c->get_weapon() ? c->get_aim() : 0.f);
+            b.w_f(c->get_weapon() ? c->get_weapon()->get_arm_angle() : 0.f);
             b.w_i32(c->motion);
             b.w_bool(c->is_dead());
 
@@ -2060,26 +2143,31 @@ static void apply_state(buf *b) {
             if (e && e->is_creature()) {
                 creature *c = static_cast<creature*>(e);
 
-                c->i_dir = i_dir;
-                c->last_i_dir = i_dir;
-                c->look_dir = (int)look_dir;
+                /* our own robot faces and aims with our own mouse - the echo
+                 * from the host is one round trip old and made it twitch */
+                bool own = (mode == MODE_CLIENT && e->id == _local_avatar);
+                bool avatar = is_player_avatar(e->id);
+
+                if (!own) {
+                    c->i_dir = i_dir;
+                    c->last_i_dir = i_dir;
+                    if (!avatar) c->look_dir = (int)look_dir;
+                }
                 c->jumping = (int)jumping;
                 c->set_hp(hp);
                 c->motion = (int)motion;
 
                 if (c->get_state() != (int)state) c->set_state((int)state);
 
-                /* arm/weapon aiming, so the shooting animation matches */
-                if (c->get_weapon())
-                    c->get_weapon()->set_arm_angle_raw(aim);
-                else
-                    c->aim(aim);
+                /* the arm angle comes below as the raw weapon angle; the old
+                 * get_aim() value here was in another unit and fought it */
+                (void)aim;
 
                 if (dead && !c->is_dead()) c->set_state(CREATURE_DEAD);
 
                 /* walking / turning / jumping animation state */
                 c->on_ground = on_ground_f;
-                c->last_i_dir = last_i_dir;
+                if (!own) c->last_i_dir = last_i_dir;
                 c->dir_timer = (int)dir_timer;
                 c->jump_time = (int)jump_time;
                 c->jump_action = (int)jump_action;
@@ -2088,7 +2176,7 @@ static void apply_state(buf *b) {
 
                 /* a turn has to go through the creature so the mesh and the
                  * head are rebuilt, otherwise the robot slides backwards */
-                if (c->dir != (int)dir || c->new_dir != (int)new_dir) {
+                if (!own && (c->dir != (int)dir || c->new_dir != (int)new_dir)) {
                     c->new_dir = (int)new_dir;
 
                     if (c->dir != (int)dir) {
@@ -2114,8 +2202,10 @@ static void apply_state(buf *b) {
                 if (has_weapon && c->get_weapon()) {
                     robot_parts::weapon *wp = c->get_weapon();
 
-                    wp->set_arm_angle_raw(wp_angle);
-                    wp->set_arm_fold(wp_fold);
+                    if (!own && !avatar) {
+                        wp->set_arm_angle_raw(wp_angle);
+                        wp->set_arm_fold(wp_fold);
+                    }
                     wp->cooldown_timer = (int)wp_cooldown;
                     wp->fired = wp_fired != 0;
                 }
@@ -2123,8 +2213,10 @@ static void apply_state(buf *b) {
                 if (has_tool && c->get_tool()) {
                     robot_parts::tool *tl = c->get_tool();
 
-                    tl->set_arm_angle_raw(tl_angle);
-                    tl->set_arm_fold(tl_fold);
+                    if (!own) {
+                        tl->set_arm_angle_raw(tl_angle);
+                        tl->set_arm_fold(tl_fold);
+                    }
                 }
             }
         }
@@ -2504,6 +2596,7 @@ static std::vector<entity*> _spawn_out; /* spawns waiting for the next frame */
 
 void on_world_teardown() {
     _spawn_out.clear();
+    _terrain_pending.clear();
     if (mode == MODE_OFF) return;
     if (!W || !G) return;
 
@@ -2540,6 +2633,7 @@ void on_world_teardown() {
  * a random plank. */
 void on_world_reset() {
     _spawn_out.clear();
+    _terrain_pending.clear();
     sync::reset();
 
     if (mode == MODE_OFF) return;
@@ -3513,6 +3607,8 @@ static void handle_message(uint8_t type, buf *b, peer *from) {
             in.mining = b->r_u8() != 0;
             in.mine_x = b->r_f();
             in.mine_y = b->r_f();
+            in.up     = b->r_u8() != 0;
+            in.down   = b->r_u8() != 0;
 
             if (b->err) break;
 
@@ -3529,6 +3625,21 @@ static void handle_message(uint8_t type, buf *b, peer *from) {
             in.layer_req = 0;
 
             from->input = in;
+        } break;
+
+        case MSG_TERRAIN: {
+            if (mode != MODE_CLIENT) break;
+
+            terrain_px t;
+            t.cx = b->r_i32();
+            t.cy = b->r_i32();
+            t.layer = b->r_u8();
+            t.x = b->r_u8();
+            t.y = b->r_u8();
+            if (b->err) break;
+
+            if (!apply_terrain_px(t))
+                _terrain_pending.push_back(t);
         } break;
 
         default:
@@ -3955,14 +4066,34 @@ static void sync_xforms() {
     }
 }
 
+static void no_roam(uint32_t id) {
+    if (!id || !W) return;
+    entity *e = W->get_entity_by_id(id);
+    if (!e || !e->is_robot()) return;
+    if (e->properties && e->num_properties > ROBOT_PROPERTY_ROAMING)
+        e->properties[ROBOT_PROPERTY_ROAMING].v.i8 = 0;
+}
+
+static void disable_avatar_roaming() {
+    if (!W || !_session_playing) return;
+
+    no_roam(_local_avatar);
+    for (std::map<uint32_t, int>::iterator it = _avatars.begin(); it != _avatars.end(); ++it)
+        no_roam(it->first);
+    for (size_t x = 0; x < _peers.size(); ++x)
+        if (_peers[x]) no_roam(_peers[x]->avatar_id);
+}
+
 void step() {
     hud_step();
 
     if (mode == MODE_OFF) return;
 
+    disable_avatar_roaming();
     process_client_doomed();
     sync_tools();
     flush_spawns();
+    process_terrain_pending();
 
     /* The layer request is no longer latched here: adventure.cc performs the
      * switch locally and calls on_local_layermove(), which is the only place
