@@ -162,7 +162,7 @@
 Подробно: [Compiling Principia](https://principia-web.se/wiki/Compiling_Principia).
 
 ```bash
-git clone <URL этого форка>
+git clone https://github.com/cat228608/principia-coop
 cd principia
 mkdir build && cd build
 cmake ..
