@@ -63,7 +63,7 @@ endif()
 # Determine platform and backend
 # ------------------------------
 
-if(SCREENSHOT_BUILD)
+if(ANDROID OR SCREENSHOT_BUILD)
 	set(BACKEND_IMGUI FALSE)
 else()
 	set(BACKEND_IMGUI TRUE)
@@ -83,8 +83,13 @@ endif()
 # Include dirs and main source files
 # ----------------------------------
 
+# co-op networking
+set(ENET_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory(lib/enet EXCLUDE_FROM_ALL)
+
 include_directories(
 	lib/
+	lib/enet/include/
 	lib/GLAD/include/
 	lib/imgui/
 	lib/lua/
@@ -203,6 +208,13 @@ if(ANDROID)
 	list(APPEND LIBS android dl log OpenSLES)
 endif()
 
+# co-op networking (ENet)
+list(APPEND LIBS enet)
+
+if(WIN32)
+	list(APPEND LIBS ws2_32 winmm)
+endif()
+
 target_link_libraries(${PROJECT_NAME} ${LIBS})
 
 add_dependencies(${PROJECT_NAME} GenerateGitVersion)
@@ -225,7 +237,11 @@ elseif(SCREENSHOT_BUILD)
 endif()
 
 if(BACKEND_IMGUI)
-	add_definitions(-DPRINCIPIA_BACKEND_IMGUI)
+	add_definitions(-DPRINCIPIA_BACKEND_IMGUI -DIMGUI_DEFINE_MATH_OPERATORS)
+
+	if(SHOULD_USE_GLES)
+		add_definitions(-DIMGUI_IMPL_OPENGL_ES2)
+	endif()
 endif()
 
 # Use a safe subset of fast math flags
@@ -260,13 +276,6 @@ endif()
 # macOS Clang's linker doesn't like these flags
 if(NOT APPLE)
 	string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,-s ")
-endif()
-
-if(ANDROID)
-	# Try to trim the size of the Android binary (TODO: do this for other platforms too)
-	target_compile_options(${PROJECT_NAME} PRIVATE -ffunction-sections -fdata-sections -fvisibility=hidden)
-
-	target_link_options(${PROJECT_NAME} PRIVATE -Wl,--gc-sections)
 endif()
 
 # Register protocol handler util on Windows
