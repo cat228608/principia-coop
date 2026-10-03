@@ -9,6 +9,7 @@
 #include "i1o1gate.hh"
 #include "item.hh"
 #include "motor.hh"
+#include "multiplayer.hh"
 #include "object_factory.hh"
 #include "pivot.hh"
 #include "prompt.hh"
@@ -167,6 +168,9 @@ static void connstrength_on_change(struct tms_wdg *w, float values[2]) {
 }
 
 int game::delete_entity(entity *e) {
+    /* co-op: tell the other players that this object is going away */
+    if (e) mp::on_local_delete(e->id);
+
     do {
         if (e == adventure::player) {
             adventure::player = 0;
@@ -705,6 +709,9 @@ int game::menu_handle_event(tms::event *ev) {
                         pending_ent[pid]->construct();
                         pending_ent[pid]->on_pause();
 
+                        /* co-op: an object placed from the menu is a player action */
+                        mp::on_local_spawn(pending_ent[pid]);
+
                         if (pending_ent[pid]->type == ENTITY_CABLE) {
                             cable *c = static_cast<cable*>(pending_ent[pid]);
                             this->selection.select(c->p[0], c->p[0]->get_body(0), (tvec2){0,0}, 0, true);
@@ -860,6 +867,15 @@ bool game::widget_clicked(principia_wdg *w, uint8_t button_id, int pid) {
     /* GW_ALL */
     switch (button_id) {
         case GW_PLAYPAUSE: {
+            /* co-op: the round only starts once every player pressed play */
+            if (mp::is_active()) {
+                if (W->is_paused()) {
+                    if (mp::request_play()) return true;
+                } else {
+                    if (mp::request_stop()) return true;
+                }
+            }
+
             if (W->is_paused()) {
                 /* PLAY */
                 if (W->is_puzzle() && G->state.sandbox) {
@@ -1429,6 +1445,9 @@ void game::init_gui() {
     tms_infof("Number of objects in menu: %d", num_objects);
 
     this->wm = new widget_manager(this, false, true);
+
+    /* co-op: lower-left message log (join/leave/chat) */
+    mp::hud_init(this->wm, this->get_surface());
     this->info_label = new p_text(font::medium, ALIGN_CENTER, ALIGN_CENTER);
 
     this->hov_text = new p_text(font::medium, ALIGN_CENTER, ALIGN_BOTTOM);

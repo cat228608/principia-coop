@@ -22,6 +22,10 @@ bool menu_main::widget_clicked(principia_wdg *w, uint8_t button_id, int pid) {
             P.add_action(ACTION_GOTO_CREATE, 1);
             break;
 
+        case BTN_COOP:
+            P.add_action(ACTION_GOTO_COOP, 1);
+            break;
+
         case BTN_BROWSE_COMMUNITY: {
             COMMUNITY_URL("browse");
             ui::open_url(url);
@@ -48,7 +52,7 @@ menu_main::menu_main() : menu_base(true) {
     this->wdg_play = this->wm->create_widget(
             this->get_surface(), TMS_WDG_LABEL,
             BTN_PLAY, AREA_MENU_TOP_CENTER);
-    this->wdg_play->set_label("   Play   ", font::large);
+    this->wdg_play->set_label("Play", font::large);
     this->wdg_play->priority = 1000;
     this->wdg_play->render_background = true;
     this->wdg_play->add();
@@ -57,11 +61,25 @@ menu_main::menu_main() : menu_base(true) {
     this->wdg_create = this->wm->create_widget(
             this->get_surface(), TMS_WDG_LABEL,
             BTN_CREATE, AREA_MENU_TOP_CENTER);
-    this->wdg_create->set_label(" Create ", font::large);
+    this->wdg_create->set_label("Create", font::large);
     this->wdg_create->priority = 900;
     this->wdg_create->render_background = true;
     this->wdg_create->add();
     this->wdg_create->label->set_scale(0.9);
+
+    this->wdg_coop = this->wm->create_widget(
+            this->get_surface(), TMS_WDG_LABEL,
+            BTN_COOP, AREA_MENU_TOP_CENTER);
+    this->wdg_coop->set_label("Co-op game", font::large);
+    this->wdg_coop->priority = 850;
+    this->wdg_coop->render_background = true;
+    this->wdg_coop->add();
+    this->wdg_coop->label->set_scale(0.9);
+
+    {
+        principia_wdg *row[] = { this->wdg_play, this->wdg_create, this->wdg_coop };
+        wdg_equalize_width(row, 3);
+    }
 
     this->wdg_browse_community = this->wm->create_widget(
             this->get_surface(), TMS_WDG_LABEL,
@@ -146,6 +164,10 @@ int menu_main::handle_input(tms::event *ev, int action) {
                 return T_OK;
 
             case TMS_KEY_3:
+                this->wdg_coop->click();
+                return T_OK;
+
+            case TMS_KEY_4:
                 this->wdg_browse_community->click();
                 return T_OK;
 

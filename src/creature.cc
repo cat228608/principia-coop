@@ -11,6 +11,7 @@
 #include "robot_parts.hh"
 #include "settings.hh"
 #include "world.hh"
+#include "multiplayer.hh"
 
 creature::creature() : cur_activator(0), cur_riding(0), activator_joint(0), last_attacker_id(0), damage_multiplier(1.f) {
     this->last_damage_tick = 0;
@@ -1829,6 +1830,10 @@ void creature::step() {
 
 void creature::damage(float amount, b2Fixture *f, damage_type dt, uint8_t damage_source, uint32_t attacker_id) {
     if (W->level.flag_active(LVL_DISABLE_DAMAGE))
+        return;
+
+    /* co-op: a client's projectiles are purely visual, the host decides */
+    if (mp::suppress_local_damage())
         return;
 
     float real_dmg = this->get_adjusted_damage(amount, f, dt, damage_source, attacker_id);

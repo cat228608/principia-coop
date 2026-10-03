@@ -120,6 +120,12 @@ struct widget_area {
 
 typedef void (*touch_cb)(struct tms_wdg *w, int pid, int ox, int oy, float rx, float ry);
 
+class principia_wdg;
+
+/* Give a row of label buttons one common width (the widest text plus a
+ * margin), so the backgrounds line up and look even. */
+void wdg_equalize_width(principia_wdg **w, int n, float margin_cm = 0.6f);
+
 class principia_wdg : public tms_wdg {
   private:
     tms::surface *_surface;
@@ -138,6 +144,9 @@ class principia_wdg : public tms_wdg {
     void (*on_dragged)(principia_wdg *w, float value_x, float value_y);
     widget_manager *parent;
     bool render_background;
+    /* label buttons are at least this wide (0 = fit the text); used to give
+     * a row of menu buttons one common width */
+    float min_width;
 
     struct render_pos {
         float x;

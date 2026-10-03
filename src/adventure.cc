@@ -7,6 +7,7 @@
 #include "gui.hh"
 #include "item.hh"
 #include "misc.hh"
+#include "multiplayer.hh"
 #include "object_factory.hh"
 #include "panel.hh"
 #include "plant.hh"
@@ -679,9 +680,22 @@ adventure::step()
         }
         b2Vec2 player_pos = adventure::player->get_position();
 
-        if (adventure::pending_layermove != 0) {
-            if (adventure::player->layermove(adventure::pending_layermove)) {
+        /* co-op: during a round a client does not simulate, the host owns
+         * every layer switch. Applying it here as well moved the character
+         * two layers at once - which is why the player ended up on the first
+         * or the last layer. */
+        if (adventure::pending_layermove != 0 && mp::suppress_local_layermove()) {
+            /* client: only request it, the host answers with MSG_LAYER */
+            mp::on_local_layermove(adventure::pending_layermove);
+            adventure::pending_layermove = 0;
+        } else if (adventure::pending_layermove != 0) {
+            int lm_dir = adventure::pending_layermove;
+
+            if (adventure::player->layermove(lm_dir)) {
                 adventure::pending_layermove = 0;
+
+                /* co-op: the host has to perform the same switch */
+                mp::on_local_layermove(lm_dir);
             } else {
                 /* layermove failed */
                 adventure::layermove_attempts ++;
@@ -817,7 +831,8 @@ adventure::step()
                                 case O_TPIXEL:
                                 case O_CHUNK:
                                     {
-                                        G->damage_tpixel(cb.result, cb.result_fx, cb.result_udata2, miner->damage, cb.pt, DAMAGE_TYPE_ELECTRICITY);
+                                        if (!(mp::is_client() && mp::session_playing()))
+                                            G->damage_tpixel(cb.result, cb.result_fx, cb.result_udata2, miner->damage, cb.pt, DAMAGE_TYPE_ELECTRICITY);
                                         struct tpixel_desc *desc = static_cast<struct tpixel_desc*>(cb.result_udata2);
                                         if (desc->material >= TPIXEL_MATERIAL_DIAMOND_ORE) {
                                             G->play_sound(SND_MINING_HIT_ORE, cb.pt.x, cb.pt.y, 0, 0.3f, false, 0, true);

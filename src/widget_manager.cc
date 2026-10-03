@@ -1,4 +1,6 @@
 #include "widget_manager.hh"
+
+#include <algorithm>
 #include "game.hh"
 #include "gui.hh"
 #include "menu-play.hh"
@@ -212,6 +214,7 @@ principia_wdg::principia_wdg(tms::surface *surface, int widget_type,
     , on_dragged(0)
     , parent(0)
     , render_background(false)
+    , min_width(0.f)
 {
     tms_wdg_init((struct tms_wdg*)this, widget_type, s0, s1);
 
@@ -371,6 +374,22 @@ void principia_wdg::set_tooltip(const char *text, p_font *font/*=font::medium*/)
     this->tooltip->outline_color = tvec4f(0.f, 0.f, 0.f, 1.f);
 }
 
+void wdg_equalize_width(principia_wdg **w, int n, float margin_cm) {
+    float m = 0.f;
+
+    for (int i = 0; i < n; ++i)
+        if (w[i] && w[i]->label)
+            m = std::max(m, (float)w[i]->label->get_width());
+
+    m += _tms.xppcm * margin_cm;
+
+    for (int i = 0; i < n; ++i) {
+        if (!w[i]) continue;
+        w[i]->min_width = m;
+        if (w[i]->is_label()) w[i]->size.x = m;
+    }
+}
+
 void principia_wdg::set_label(const char *text, p_font *font/*=font::medium*/) {
     if (!this->label)
         this->label = new p_text(font);
@@ -384,7 +403,7 @@ void principia_wdg::set_label(const char *text, p_font *font/*=font::medium*/) {
     this->label->set_text(text);
 
     if (this->is_label()) {
-        this->size.x = this->label->get_width();
+        this->size.x = std::max((float)this->label->get_width(), this->min_width);
         this->size.y = this->label->get_height();
     }
 }
@@ -981,9 +1000,9 @@ void widget_manager::render() {
 
                 if (w->render_background) {
                     //tms_infof("RENDER BG");
-                    float width = w->label->get_width();
-                    float height = w->label->get_height();
-                    this->get_home()->add_rounded_square(pt->x, pt->y, width * 1.05f, height * 1.05f, bg_color, 4.f);
+                    float width = std::max((float)w->label->get_width() * 1.05f, w->min_width);
+                    float height = w->label->get_height() * 1.05f;
+                    this->get_home()->add_rounded_square(pt->x, pt->y, width, height, bg_color, 4.f);
                 }
             }
 
@@ -1096,7 +1115,7 @@ void widget_manager::rearrange() {
         float y = w->area->y;
 
         if (w->_type == TMS_WDG_LABEL && w->label) {
-            w->size.x = w->label->get_width();
+            w->size.x = std::max((float)w->label->get_width(), w->min_width);
             w->size.y = w->label->get_height();
 
             if (w->area->label_halign == ALIGN_LEFT) {
