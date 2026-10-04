@@ -1,43 +1,192 @@
-# Principia Open Source Project
-![Principia](https://raw.githubusercontent.com/Bithack/principia/master/data-src/github-image0.gif)
+# Principia Multiplayer (fork)
 
-Principia is a sandbox physics game originally released in November 2013. It is the successor to the 2011 Android hit game "Apparatus". In August of 2022 Principia was released as open source, and is now being developed as an open source project by the Principia community.
+<img width="2521" height="1132" alt="image" src="https://github.com/user-attachments/assets/69517b86-8357-4186-ac82-add8366ac0af" />
 
-Principia runs on anything with a recent enough version of Windows, Linux or Android. Experimental ports to Haiku OS and macOS are also available, and work to port Principia to other platforms are very welcome.
 
-## Useful Links
-* New community site: https://principia-web.se
+> **Неофициальный форк [Principia](https://github.com/Bithack/principia) с сетевой совместной игрой.**
+> В оригинальной Principia мультиплеера никогда не было: игра полностью однопользовательская.
+> Этот форк добавляет кооператив по сети: строить и играть вместе с друзьями в одном мире, в реальном времени.
 
-* Download: https://principia-web.se/download
+*English summary: an unofficial fork of the open-source physics sandbox Principia that adds real-time online co-op (host-authoritative, ENet, port 7777). Build together, then press Play and run the level together.*
 
-* Old community site archive: https://archive.principia-web.se
+---
 
-* Wiki: https://principia-web.se/wiki/
+## О проекте
 
-* Forum: https://principia-web.se/forum/
+**Principia** — физическая песочница, вышедшая в 2013 году (наследник Android-хита *Apparatus*). В 2022 году её исходный код открыли, и с тех пор игру развивает сообщество.
 
-* Discord server: https://principia-web.se/discord
+В этом форке к игре добавлен **сетевой мультиплеер**:
 
-* Codeberg mirror: https://codeberg.org/principia/principia
+- 🧱 **Совместная постройка.** Все игроки редактируют один и тот же уровень: ставят и удаляют объекты, двигают и поворачивают их, меняют размеры и настройки, соединяют гвоздями, шарнирами и шестернями, переносят между слоями.
+- ▶️ **Совместная игра.** Хост и клиенты одновременно нажимают «Играть», и у каждого появляется свой робот.
+- 🤖 **Синхронизация персонажей.** Ходьба, прыжки, лестницы, переход между слоями, прицеливание, поворот, выстрелы, урон и смерть.
+- ⛏️ **Разрушаемый мир.** Разрушение земли шокером, взрывами и пулями видно всем игрокам.
+- 📦 **Физика и объекты.** Движущиеся тела, постройки, NPC и предметы, которые появляются и исчезают во время игры.
+- 🛠️ **Инструменты.** Выбранный инструмент и оружие каждого робота видны остальным.
 
-* Mastodon: https://hachyderm.io/@principia
+## Как играть
 
-## Binary builds
-Release builds builds of Principia for Windows, Android and Linux are available on the [download page](https://principia-web.se/download).
+1. Один игрок открывает в главном меню совместную игру и создаёт комнату (он становится **хостом**).
+2. Остальные подключаются по IP-адресу хоста (**клиенты**).
+3. Все строят уровень вместе. Когда готовы, каждый нажимает «Играть», и раунд начинается у всех одновременно.
+4. Остановка раунда возвращает всех обратно в режим постройки.
 
-There are also nightly build artifacts that get automatically built by GitHub Actions CI on each commit and are available for download, see [Nightly Builds](https://principia-web.se/wiki/Nightly_Builds) on the wiki.
+**Сеть:** хосту нужно открыть **UDP-порт 7777** (проброс портов на роутере или общая локальная/VPN-сеть, например Radmin VPN, ZeroTier, Tailscale).
 
-## Getting involved
-Feel free to fork this project and send in your pull requests. This is a community project and the community decides how the project evolves.
+> ⚠️ Хост и клиенты должны использовать **одну и ту же сборку**. Версии с разным номером протокола не подключатся друг к другу.
 
-For a brief overview on how to get started with contributing to the game, see the [Contributing to the Game](https://principia-web.se/wiki/Contributing_to_the_Game) page on the wiki.
+### Управление клиента
 
-Also be sure to follow [@principia](https://hachyderm.io/@principia) on Mastodon for more updates about the project.
+| Действие | Клавиши |
+|---|---|
+| Ходьба | `A` / `D` или стрелки ← → |
+| Прыжок | `Пробел` |
+| Вверх/вниз по лестнице, смена слоя | `W` / `S` или стрелки ↑ ↓ |
+| Прицел и выстрел | мышь, ЛКМ |
 
-## Building from source
-See [Compiling Principia](https://principia-web.se/wiki/Compiling_Principia) on the wiki for building from source on supported platforms.
+## Архитектура
 
-(You can also view the plaintext Markdown document [here](https://raw.githubusercontent.com/principia-game/wiki/master/pages/Compiling_Principia.md))
+### Модель: хост решает всё
 
-## License
-See [LICENSE.md](LICENSE.md)
+Сетевая модель — **host authoritative** (хост — единственный источник правды):
+
+- **Клиент отправляет только ввод:** нажатые клавиши, угол прицела, действия, запросы на постройку.
+- **Хост применяет ввод к роботу клиента,** считает физику, урон, разрушения и рассылает результат всем.
+- **Клиент предсказывает движение своего робота** локально (без задержки) и мягко подтягивается к состоянию хоста.
+- Даже когда клиент строит, его действие уходит хосту как запрос; объект создаёт хост и рассылает его всем.
+
+Это исключает читы со стороны клиента и рассинхронизацию «у каждого своя версия мира».
+
+### Без параллельных систем
+
+Мультиплеер встроен в существующий движок, а не написан поверх него:
+
+- **Идентификаторы.** Используется родной `entity::id`. Хост выдаёт клиентам блоки ID, чтобы номера никогда не пересекались.
+- **Сериализация.** Объекты и уровень передаются родными `fill_buffer()` / `load_buffer()`; собственного формата сохранения нет.
+- **Подключение посреди игры.** Новый игрок получает снимок текущего уровня тем же механизмом, которым игра сохраняет и загружает уровни.
+
+### Транспорт
+
+- **Библиотека:** [ENet](http://enet.bespin.org/) поверх UDP.
+- **Порт по умолчанию:** `7777`.
+- **Каналы:** надёжный (важные события) и ненадёжный (частые потоки позиций, где потерянный пакет просто заменяется следующим).
+- **Текущая версия протокола:** `19`.
+
+## Протокол
+
+### Частоты и способы доставки
+
+| Что | Частота | Доставка | Как применяет клиент |
+|---|---|---|---|
+| Ввод игрока | каждый тик при изменении, иначе редкий heartbeat | надёжно | — (применяет хост) |
+| Позиции игроков | 20 Гц | ненадёжно | интерполяция, телепорт при ошибке > 2 м |
+| Динамические тела | 20 Гц | ненадёжно | коррекция 30 % за тик, телепорт при ошибке > 2 м |
+| Анимации | только при изменении | надёжно | смена состояния |
+| Выстрелы | по событию | надёжно | позиция и направление; урон считает хост |
+| Соединения, слои, создание и удаление | по событию | надёжно | точное применение |
+| Разрушение земли | по событию | надёжно | удаление клетки участка |
+| Подключение | один раз | надёжно | снимок уровня через `fill_buffer` → `load_buffer` |
+
+### Типы сообщений
+
+<details>
+<summary>Основные сообщения сессии</summary>
+
+| Сообщение | Направление | Назначение |
+|---|---|---|
+| `MSG_HELLO` | клиент → хост | версия протокола, имя игрока |
+| `MSG_WELCOME` | хост → клиент | ID игрока, блок ID объектов, данные комнаты |
+| `MSG_PEER_JOIN` / `MSG_PEER_LEAVE` | хост → все | игрок вошёл / вышел |
+| `MSG_CHAT` | все | чат |
+| `MSG_SNAPSHOT_BEGIN` / `MSG_SNAPSHOT_END` | хост → клиент | передача снимка уровня |
+| `MSG_REQUEST_SNAPSHOT` | клиент → хост | запрос снимка |
+| `MSG_SPAWN` | все | создание объекта (сериализованный объект) |
+| `MSG_DELETE` | все | удаление объекта |
+| `MSG_XFORM` / `MSG_GROUP_XFORM` | все | перемещение и поворот объекта / сваренной группы |
+| `MSG_ENTITY_UPDATE` | все | изменение настроек, размера, цвета |
+| `MSG_CONNECT` / `MSG_DISCONNECT` | все | создание / разрыв соединения |
+| `MSG_READY` / `MSG_STOP_READY` | клиент → хост | игрок нажал «Играть» / «Стоп» |
+| `MSG_START_PLAY` / `MSG_STOP_PLAY` | хост → все | начало / конец раунда |
+| `MSG_AVATAR` / `MSG_REQUEST_AVATARS` | хост ↔ клиент | какой робот принадлежит какому игроку |
+| `MSG_INPUT` | клиент → хост | ввод игрока |
+| `MSG_STATE` | хост → клиент | пакет состояния физики и анимаций |
+| `MSG_EVENT` | все | разовые события: урон, смерть |
+| `MSG_ANIM` | все | начало / конец анимации |
+| `MSG_TOOL` | хост → клиент | выбранный инструмент и оружие робота |
+| `MSG_TERRAIN` | хост → клиент | разрушенная клетка земли |
+| `MSG_PING` / `MSG_PONG` | все | измерение пинга |
+| `MSG_PLAYERS` | хост → клиент | быстрые данные игроков |
+
+</details>
+
+<details>
+<summary>Потоки синхронизации раунда</summary>
+
+| Сообщение | Доставка | Назначение |
+|---|---|---|
+| `MSG_PLAYER_POS` | ненадёжно | пакет позиций игроков |
+| `MSG_BODY_POS` | ненадёжно | пакет позиций динамических тел (до 128 за пакет) |
+| `MSG_CREATURE_STATE` | надёжно | состояние, флаги, направление существ |
+| `MSG_LAYER` | надёжно | смена слоя |
+| `MSG_SHOT` | надёжно | начало и направление выстрела |
+
+</details>
+
+### Параметры синхронизации
+
+| Константа | Значение | Смысл |
+|---|---|---|
+| `MP_SYNC_INTERVAL` | 0.05 с | 20 Гц для потоков позиций |
+| `MP_SYNC_SNAP_DIST` | 2.0 м | при большей ошибке — телепорт |
+| `MP_SYNC_LERP` | 0.30 | доля коррекции за тик |
+| `MP_SYNC_DEADZONE` | 0.02 м | мелкая ошибка не корректируется |
+| `MP_SYNC_OWN_LERP` | 0.10 | более мягкая коррекция своего робота |
+| `MP_SYNC_BATCH` | 128 | объектов в одном пакете |
+
+## Что изменено в коде
+
+| Файл | Назначение |
+|---|---|
+| `src/multiplayer.cc/.hh` | сессия, сеть, ввод, постройка, раунд, разрушение земли |
+| `src/mp_sync.cc/.hh` | потоки позиций, анимации, выстрелы, слои |
+| `src/menu_coop.cc`, `src/menu_main.cc` | меню совместной игры |
+| `src/widget_manager.cc/.hh`, `src/game-gui.cc` | интерфейс и выравнивание кнопок |
+| `src/adventure.cc`, `src/creature.cc`, `src/game.cc` | точки встраивания в игровую логику |
+
+В основном код игры не переписан: мультиплеер подключается к существующим функциям через небольшие вызовы.
+
+## Сборка
+
+Сборка такая же, как у оригинала: CMake, поддерживаются **Windows, Linux и Android**. ENet лежит в `lib/enet` и собирается вместе с игрой.
+
+Подробно: [Compiling Principia](https://principia-web.se/wiki/Compiling_Principia).
+
+```bash
+git clone https://github.com/cat228608/principia-coop
+cd principia
+mkdir build && cd build
+cmake ..
+cmake --build . -j
+```
+
+## Известные ограничения
+
+- Разрушения земли, сделанные **до входа** игрока, у него не появятся.
+- Частичные повреждения земли (трещины без разрушения) не синхронизируются.
+- Клавиши клиента фиксированы; экранные кнопки на Android для лестниц пока не передаются.
+- Снаряжение роботов (головы, ноги, колёса, весь набор оружия) синхронизируется не полностью.
+- Брошенный предмет может терять скорость на стороне клиента.
+
+Ошибки и предложения — в [Issues](../../issues).
+
+## Благодарности
+
+- **Bithack** — авторы Principia.
+- **Сообщество Principia** — открытая разработка: [principia-web.se](https://principia-web.se), [оригинальный репозиторий](https://github.com/Bithack/principia).
+- **ENet** — сетевая библиотека.
+
+Это неофициальный форк, он не связан с командой оригинального проекта.
+
+## Лицензия
+
+Как и у оригинала, см. [LICENSE.md](LICENSE.md).
