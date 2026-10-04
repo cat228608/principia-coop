@@ -1,4 +1,5 @@
 #include "world.hh"
+#include "multiplayer.hh"
 #include "adventure.hh"
 #include "animal.hh"
 #include "artificial_gravity.hh"
@@ -147,6 +148,8 @@ void world::add(entity *e) {
 
     if (this->paused)
         this->step_count = 0;
+    else
+        mp::on_runtime_spawn(e);
 }
 
 void world::erase(entity *e) {
@@ -188,6 +191,8 @@ void world::erase(entity *e) {
 
 bool world::remove(entity *e) {
     bool ret = true;
+
+    if (!this->is_paused()) mp::on_runtime_remove(e);
 
     this->erase(e);
 
@@ -289,10 +294,15 @@ bool world::step() {
 #ifdef PROFILING
             Uint32 ss = SDL_GetTicks();
 #endif
+            mp::set_chunk_loading(true);
             this->cwindow->step();
+            mp::set_chunk_loading(false);
 
 #ifndef SCREENSHOT_BUILD
-            if (!this->level.flag_active(LVL_DISABLE_PHYSICS)) {
+            /* co-op: a client is a pure viewer during a round. If it also
+             * stepped its own physics it built a second, diverging world. */
+            if (!this->level.flag_active(LVL_DISABLE_PHYSICS)
+                    && !mp::suppress_local_physics()) {
                 this->b2->Step(((float)(WORLD_STEP+WORLD_STEP_SPEEDUP) * .000001f) * G->get_time_mul(),
                         this->level.velocity_iterations,
                         this->level.position_iterations);
@@ -301,7 +311,9 @@ bool world::step() {
 
             //if (adventure::player) tms_infof("post step %f", adventure::player->get_position().x);
             //
+            mp::set_chunk_loading(true);
             this->reload_modified_chunks();
+            mp::set_chunk_loading(false);
 
             for (std::set<entity*>::iterator i = this->prestepable.begin();
                     i != this->prestepable.end(); i++) {
@@ -322,6 +334,10 @@ bool world::step() {
 #endif
 
 #ifndef SCREENSHOT_BUILD
+            /* co-op: clients replay the host's simulation instead of
+             * running their own logic (avoids duplicated projectiles etc) */
+            if (!mp::suppress_local_sim()) {
+
             if (w_is_enabled()) {
                 w_mstep_set = &this->mstepable;
 
@@ -344,14 +360,18 @@ bool world::step() {
             if (w_is_enabled()) {
                 w_wait(-1);
             }
+
+            } /* co-op: end of local logic block */
 # ifdef PROFILING
             tms_infof("world: mstep entities: %d", SDL_GetTicks() - ss);
             ss = SDL_GetTicks();
 # endif
 
+            if (!mp::suppress_local_sim()) {
             for (std::set<entity*>::iterator i = this->stepable.begin();
                     i != this->stepable.end(); i++) {
                 (*i)->step();
+            }
             }
 # ifdef PROFILING
             tms_infof("world: step entities: %d", SDL_GetTicks() - ss);
@@ -464,7 +484,9 @@ bool world::step() {
         if (G->get_mode() != GAME_MODE_EDIT_PANEL && G->get_mode() != GAME_MODE_EDIT_GEARBOX
                 && G->get_mode() != GAME_MODE_SELECT_SOCKET&&G->get_mode() != GAME_MODE_SELECT_CONN_TYPE) {
 
+            mp::set_chunk_loading(true);
             this->cwindow->step();
+            mp::set_chunk_loading(false);
 
 #if 0
             if (this->step_count < 80) {
@@ -492,7 +514,9 @@ bool world::step() {
             this->step_count ++;
         }
 
+        mp::set_chunk_loading(true);
         this->reload_modified_chunks();
+        mp::set_chunk_loading(false);
     }
 
     return false;
@@ -1325,6 +1349,9 @@ void world::destroy_joints() {
 }
 
 void world::reset() {
+    /* co-op: every pointer into this level is about to dangle */
+    mp::on_world_teardown();
+
     of::_id = 1;
 
     this->locked = false;
@@ -1419,6 +1446,9 @@ float world::get_height(float x) {
 }
 
 void world::create(int type, uint64_t seed, bool play) {
+    /* co-op: the old level (and every pointer into it) is about to die */
+    mp::on_world_reset();
+
     of::_id = 1;
     this->level_id_type = LEVEL_LOCAL;
     this->reset();

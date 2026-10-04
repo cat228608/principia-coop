@@ -1,3 +1,0 @@
-
-# Exclude vendored libraries from GitHub language detection
-lib/* linguist-vendored

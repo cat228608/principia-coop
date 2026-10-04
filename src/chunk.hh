@@ -248,6 +248,13 @@ class chunk_preloader
     void write_chunk(lvlinfo *lvl, lvlbuf *lb, level_chunk *c);
 
   public:
+    /* co-op: true while an object of the level is still waiting in the
+     * preloader (its chunk is not loaded yet) */
+    bool has_pending_entity(uint32_t id) const
+    {
+        return this->entities.count(id) || this->loaded_entities.count(id);
+    }
+
     chunk_preloader();
     ~chunk_preloader();
     void reset();

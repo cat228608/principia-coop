@@ -119,7 +119,11 @@
 #include "mavg.cc"
 #include "menu-base.cc"
 #include "menu_create.cc"
+#include "menu_coop.cc"
 #include "menu_main.cc"
+#include "mp_net.cc"
+#include "multiplayer.cc"
+#include "mp_sync.cc"
 #include "menu_pkg.cc"
 #include "menu-play.cc"
 #include "menu_shared.cc"
@@ -306,6 +310,7 @@
 	#include "ui/treasure_chest.cc"
 	#include "ui/variable.cc"
 	#include "ui/vendor.cc"
+	#include "ui/coop.cc"
 #endif
 
 #include "tms/cpp.cc"

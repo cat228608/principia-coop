@@ -1,4 +1,5 @@
 #include "game.hh"
+#include "multiplayer.hh"
 #include "world.hh"
 #include "group.hh"
 #include "object_factory.hh"
@@ -130,6 +131,9 @@ connection *game::apply_connection(connection *c, int option) {
 
     tms_assertf(c->e, "connection missing first entity");
     tms_assertf(c->o, "connection missing second entity");
+
+    /* co-op: broadcast the connection before we apply it locally */
+    mp::on_local_connection(c, option);
 
     tms_debugf("apply connection, type %d, option %d", c->type, option);
     tms_debugf("e_id: %u, o_id: %u", c->e->id, c->o?c->o->id:0);

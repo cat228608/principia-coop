@@ -14,8 +14,10 @@
 #include "loading_screen.hh"
 #include "material.hh"
 #include "menu-play.hh"
+#include "menu_coop.hh"
 #include "menu_create.hh"
 #include "menu_main.hh"
+#include "multiplayer.hh"
 #include "menu_pkg.hh"
 #include "menu_shared.hh"
 #include "model.hh"
@@ -383,7 +385,7 @@ void tproject_set_args(int argc, char **argv) {
 }
 
 void tproject_window_size_changed() {
-    if (!settings["window_maximized"]->v.b  && !settings["window_fullscreen"]->v.b && settings["autosave_screensize"]->v.b) {
+    if (!settings["window_maximized"]->v.b && settings["autosave_screensize"]->v.b) {
         settings["window_width"]->v.i = _tms.window_width;
         settings["window_height"]->v.i = _tms.window_height;
     }
@@ -639,6 +641,75 @@ static void perform_action(int x, void *data) {
             }
             tms::set_screen(P.s_menu_play);
             break;
+
+        case ACTION_GOTO_COOP:
+            if (!data) {
+                sm::stop_all();
+            }
+            tms::set_screen(P.s_menu_coop);
+            break;
+
+        case ACTION_COOP_HOST: {
+            mp::host_config *cfg = (mp::host_config*)data;
+
+            if (cfg) {
+                /* create a brand new, empty adventure room, exactly like
+                 * "Create adventure" does. this gives us a room _and_ a robot
+                 * for the host to control right away */
+                G->resume_action = GAME_RESUME_NEW;
+                G->resume_level_type = LCAT_ADVENTURE;
+                G->screen_back = P.s_menu_coop;
+
+                G->create_level(LCAT_ADVENTURE, true, false);
+
+                /* apply the room size the host asked for */
+                W->level.size_x[0] = cfg->room_width / 2;
+                W->level.size_x[1] = cfg->room_width - (cfg->room_width / 2);
+                W->level.size_y[0] = cfg->room_height / 2;
+                W->level.size_y[1] = cfg->room_height - (cfg->room_height / 2);
+
+                snprintf(W->level.name, 255, "%s", cfg->server_name);
+                W->level.name_len = strlen(W->level.name);
+
+                W->init_level(true);
+                G->apply_level_properties();
+                mp::attach_local_player();
+                G->refresh_widgets();
+
+                if (mp::host_start(*cfg)) {
+                    tms::set_screen(G);
+                    ui::messagef("Co-op server started on port %d", cfg->port);
+                } else {
+                    tms::set_screen(P.s_menu_coop);
+                }
+
+                delete cfg;
+            }
+        } break;
+
+        case ACTION_COOP_JOIN: {
+            mp::join_config *cfg = (mp::join_config*)data;
+
+            if (cfg) {
+                /* an empty adventure room, the host will stream us its
+                 * contents and tell us which robot is ours */
+                G->resume_action = GAME_RESUME_NEW;
+                G->resume_level_type = LCAT_ADVENTURE;
+                G->screen_back = P.s_menu_coop;
+
+                G->create_level(LCAT_ADVENTURE, true, false);
+                G->apply_level_properties();
+                G->refresh_widgets();
+
+                if (mp::client_start(*cfg)) {
+                    tms::set_screen(G);
+                } else {
+                    tms::set_screen(P.s_menu_coop);
+                }
+
+                delete cfg;
+            }
+        } break;
 
         case ACTION_SAVE_STATE:
             if (W->is_playing() && W->level.flag_active(LVL_ALLOW_QUICKSAVING)) {
@@ -1088,7 +1159,30 @@ void tproject_quit() {
     tms_infof("Cleaning settings...");
     settings.clean();
 
-    delete G;
+    /* co-op: close the sockets and switch every co-op hook off *before* the
+     * game is torn down. Destroying G destroys the world, which runs
+     * world::reset and all the entity delete hooks - if the co-op session is
+     * still active those hooks touch G while it is being deleted. */
+    /* Not just "are we in a session right now": losing the connection ends
+     * the session but leaves every networked object in the world, and the
+     * teardown crashed on those when the player quit afterwards. */
+    bool was_coop = (mp::mode != mp::MODE_OFF) || mp::had_session;
+
+    mp::shutdown(0);
+
+    /* Everything that has to survive (settings, progress) is already written
+     * to disk at this point, and the process is about to die anyway, so the
+     * final teardown of the game only exists to free memory.
+     *
+     * After a co-op session the world contains objects that were streamed in
+     * from the other player, and tearing that down on exit is what produced
+     * the "Segmentation fault" popup when quitting. Skipping it is harmless
+     * (the OS reclaims the memory) and keeps the exit clean. */
+    if (was_coop) {
+        tms_infof("co-op: skipping final teardown on exit");
+    } else {
+        delete G;
+    }
 
     sticky::_deinit();
 
@@ -1691,11 +1785,13 @@ static int initial_loader(int step) {
             P.s_menu_main = new menu_main();
             P.s_menu_create = new menu_create();
             P.s_menu_play = new menu_play();
+            P.s_menu_coop = new menu_coop();
 
             P.screens.push_back(P.s_menu_pkg);
             P.screens.push_back(P.s_menu_main);
             P.screens.push_back(P.s_menu_create);
             P.screens.push_back(P.s_menu_play);
+            P.screens.push_back(P.s_menu_coop);
 #endif
 
             P.s_loading_screen->set_text("Loading progress...");
@@ -1735,6 +1831,8 @@ static int initial_loader(int step) {
 
             tms_infof("%27s: %u", "Total", total);
 #endif
+
+            ui::emit_signal(SIGNAL_QUICKADD_REFRESH);
             return LOAD_DONE;
         }
 

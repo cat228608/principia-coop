@@ -29,7 +29,7 @@ class principia_wdg;
 
 namespace tms { class surface; }
 
-#define MP_PROTOCOL_VERSION   19   /* 19: terrain pixels, ladder up/down */
+#define MP_PROTOCOL_VERSION   23   /* 23: connections to the terrain (ground) */
 #define MP_DEFAULT_PORT       7777
 #define MP_MAX_PLAYERS        8
 #define MP_ID_BLOCK           2000000u   /* entity id range per player */
@@ -81,8 +81,14 @@ enum {
     MSG_REQUEST_AVATARS,/* c->s: 'I do not know which robot is mine' */
     MSG_TOOL,           /* s->c: robot id, equipped tool, equipped weapon */
     MSG_TERRAIN,        /* s->c: chunk x/y, layer, pixel x/y destroyed */
+    MSG_CABLE,          /* both: cable id, type, both plug ends (build mode) */
+    MSG_CABLE_DEL,      /* both: cable id removed (build mode) */
+    MSG_PANEL,          /* c->s: RC panel id + widget values (round) */
+    MSG_ROBOT_CFG,      /* both: robot head/feet/back/front/bolts/faction/items (build mode) */
+    MSG_MOVEABLE,       /* both: object id + "moveable when playing" flag (build mode) */
 };
 
+#define MP_SYNC_PANEL_INTERVAL 0.05  /* client -> host RC panel values */
 #define MP_STATE_INTERVAL     0.033   /* seconds between state batches */
 #define MP_INPUT_INTERVAL     0.033   /* seconds between input updates */
 /* Player characters are what the eye follows, so they get their own, much
@@ -241,6 +247,7 @@ void on_local_spawn(entity *e);
 void on_local_delete(uint32_t entity_id);
 void on_local_connection(connection *c, int option);
 void on_local_disconnect(uint32_t a, uint32_t b);
+void on_local_disconnect_ents(entity *a, entity *b);
 bool is_syncing();
 void send_chat(const char *text);
 
@@ -304,6 +311,8 @@ void on_terrain_pixel(int cx, int cy, int layer, int x, int y);
  * world::step() must wrap its cwindow->step() call in these.
  */
 void set_chunk_loading(bool loading);
+/* set by level_chunk while it breaks the joints of dug-away pixels */
+void set_ground_dig(bool on);
 
 /** true while a co-op client must not apply a layer switch locally. */
 bool suppress_local_layermove();

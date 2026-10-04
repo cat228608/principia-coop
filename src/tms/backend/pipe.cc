@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/time.h>
@@ -90,6 +91,24 @@ int _pipe_listener(void *p)
 
 void setup_pipe(int argc, char **argv)
 {
+    /* Co-op testing on a single machine: allow several instances.
+     * Set PRINCIPIA_MULTI=1 in the environment, or pass --multi. */
+    {
+        const char *multi = getenv("PRINCIPIA_MULTI");
+        bool allow_multi = (multi && multi[0] && multi[0] != '0');
+
+        for (int x = 1; x < argc && !allow_multi; ++x) {
+            if (argv[x] && (strcmp(argv[x], "--multi") == 0
+                         || strcmp(argv[x], "--multiple-instances") == 0))
+                allow_multi = true;
+        }
+
+        if (allow_multi) {
+            tms_infof("Single-instance lock disabled (multi-instance mode).");
+            return;
+        }
+    }
+
 #ifdef SDL_PLATFORM_WINDOWS
 
     pipe_h = CreateNamedPipeW(

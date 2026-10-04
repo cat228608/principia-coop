@@ -67,3 +67,6 @@ namespace UiSfxEmitterLegacy { void open(); void layout(); }
 namespace UiMultiConfig     { void open(); void layout(); }
 namespace UiOpenState      { void open(bool no_testplaying = false); void layout(); }
 namespace UiOpenObject     { void open(bool multiemitter_mode = false); void layout(); }
+namespace UiCoopHost       { void open(); void layout(); }
+namespace UiCoopJoin       { void open(); void layout(); }
+namespace UiCoopChat       { void open(); void layout(); }

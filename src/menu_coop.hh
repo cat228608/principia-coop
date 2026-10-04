@@ -1,29 +1,25 @@
 #pragma once
 
-#include "menu-base.hh" // ;-)
 #include "main.hh"
+#include "menu-base.hh"
 
 class principia_wdg;
 class widget_manager;
 class p_text;
 
-class menu_main : public menu_base
+/* "Co-op game" menu: host a server or join one by IP. */
+class menu_coop : public menu_base
 {
   public:
-    /** Widgets **/
-    principia_wdg *wdg_update_available;
-
-    principia_wdg *wdg_play;
-    principia_wdg *wdg_create;
-    principia_wdg *wdg_browse_community;
-    principia_wdg *wdg_coop;
-
-    principia_wdg *wdg_featured_level[MAX_FEATURED_LEVELS_FETCHED];
+    principia_wdg *wdg_host;
+    principia_wdg *wdg_join;
+    principia_wdg *wdg_disconnect;
+    principia_wdg *wdg_info;
 
   public:
     bool widget_clicked(principia_wdg *w, uint8_t button_id, int pid);
 
-    menu_main();
+    menu_coop();
 
     int resume();
     int pause();

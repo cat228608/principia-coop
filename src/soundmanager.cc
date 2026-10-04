@@ -834,48 +834,14 @@ Mix_Chunk *sm::genchunk;
 
 sm_channel sm::channels[SM_MAX_CHANNELS];
 
-static void genwave_write_sample(void *stream, int index, SDL_AudioFormat format, float sample) {
-    switch (format) {
-    case SDL_AUDIO_U8:
-        ((uint8_t *)stream)[index] = (uint8_t)tclampf(sample * 127.f + 128.f, 0.f, 255.f);
-        break;
-    case SDL_AUDIO_S8:
-        ((int8_t *)stream)[index] = (int8_t)tclampf(sample * 127.f, -128.f, 127.f);
-        break;
-    case SDL_AUDIO_S16:
-        ((int16_t *)stream)[index] = (int16_t)tclampf(sample * 32767.f, -32768.f, 32767.f);
-        break;
-    case SDL_AUDIO_S32:
-        ((int32_t *)stream)[index] = (int32_t)tclampf(sample * 2147483647.f, -2147483648.f, 2147483647.f);
-        break;
-    case SDL_AUDIO_F32:
-        ((float *)stream)[index] = sample;
-        break;
-    default:
-        tms_debugf("genwave: unimplemented audio format %s", SDL_GetAudioFormatName(format));
-        break;
-    }
-}
-
 void genwave(int chan, void *stream, int len, void *udata) {
-    int frequency, channels;
-    SDL_AudioFormat format;
-    if (!Mix_QuerySpec(&frequency, &format, &channels) || frequency <= 0 || channels <= 0)
-        return;
-
-    const int bytes_per_sample = SDL_AUDIO_BYTESIZE(format);
-    if (bytes_per_sample <= 0)
-        return;
-
-    // 44100 Hz is the reference sample rate for genwave, but if the actual sample rate is different we need
-    // to scale accordingly to not mess up the pitch of the generated sound.
-    const double sample_rate_scale = 44100. / frequency;
-    const int samples_per_tick = (int)roundf(353.f / sample_rate_scale);
+    Sint16* pstream = (Sint16*) stream;
 
     //int vol = roundf((65535./2. *.75) *data->volume);
     bool did_wait = false;
 
-    for (int i = 0; i < len / bytes_per_sample / channels; i++) {
+    for (int i = 0; i < len/2/2; i++)
+    {
         int16_t v = 0;
 
         for (int chan=0; chan<SM_MAX_CHANNELS; chan++) {
@@ -895,14 +861,14 @@ void genwave(int chan, void *stream, int len, void *udata) {
                 data->bitcrush_counter = (data->bitcrush_counter+1)%b;
 
                 if (data->bitcrush_counter == 0) {
-                    data->phase += data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq / frequency * b;
+                    data->phase += data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq/44100. * b;
                 }
             } else {
-                data->phase += data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq / frequency;
+                data->phase += data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq / 44100.;
             }
 
             if (data->freq_vibrato > 0.f && data->freq_vibrato_width > 0.f)
-                data->phase += sin(M_PI*2. * _tms.last_time/1000000. * data->freq_vibrato) * data->freq_vibrato_width * data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq / frequency;
+                data->phase += sin(M_PI*2. * _tms.last_time/1000000. * data->freq_vibrato) * data->freq_vibrato_width * data->ticks[sm::read_counter%SM_GENWAVE_NUM_TICKS].freq / 44100.;
 
             double phase = data->phase;
 
@@ -930,20 +896,21 @@ void genwave(int chan, void *stream, int len, void *udata) {
             v += wave * vol;
         }
 
-        float sample = (float)v / 32768.f;
-        for (int c = 0; c < channels; c++)
-            genwave_write_sample(stream, i * channels + c, format, sample);
+        *pstream = v;
+        pstream++;
+        *pstream = v; /* stereo */
+        pstream++;
 
         sm::tick_counter ++;
 
-        if (sm::tick_counter >= samples_per_tick) {
+        if ((sm::tick_counter >= 353)) {
             sm::read_counter ++;
 
             if (sm::read_counter >= sm::write_counter) {
                 sm::read_counter = sm::write_counter-1;
                 did_wait = true;
             } else {
-                sm::tick_counter = (int)roundf((((int)sm::write_counter - (int)sm::read_counter) - SM_GENWAVE_PRETICKS) * 4.f / sample_rate_scale);
+                sm::tick_counter = (((int)sm::write_counter - (int)sm::read_counter) - SM_GENWAVE_PRETICKS)*4;
                 //sm::tick_counter = 0;
                 //sm::remainder_counter ++;
 
@@ -1029,14 +996,9 @@ void sm::init() {
         Mix_ChannelFinished(&channel_finished_cb);
         sm::initialized = true;
 
-        // some verbose info about the audio subsystem
+        /* verbose some info about the audio subsystem */
         tms_infof(">> Audio Device: %s", SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK));
         tms_infof(">> Audio Driver: %s", SDL_GetCurrentAudioDriver());
-
-        // also log the actual audio format that SDL is using
-        SDL_AudioSpec spec;
-        SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, 0);
-        tms_infof(">> Audio Format: %s, %d Hz, %d channels", SDL_GetAudioFormatName(spec.format), spec.freq, spec.channels);
     }
 
     /* sm must be initialized after settings has been initialized */

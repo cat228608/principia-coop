@@ -4,6 +4,7 @@
 #include "group.hh"
 #include "terrain.hh"
 #include "gentype.hh"
+#include "multiplayer.hh"
 
 /* chunked loading/unloading
  *
@@ -468,6 +469,7 @@ level_chunk::recreate_fixtures(bool initial)
     if (!initial) {
         connection *cc = this->conn_ll;
         if (cc) {
+            mp::set_ground_dig(true);
             do {
                 tms_debugf("checking conn %p", cc);
                 connection *next = cc->next[1];//cc->e == this ? 0 : 1];
@@ -478,6 +480,7 @@ level_chunk::recreate_fixtures(bool initial)
                 }
                 cc = next;
             } while (cc);
+            mp::set_ground_dig(false);
         }
     }
 }

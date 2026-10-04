@@ -9,6 +9,7 @@ class menu_pkg;
 class menu_main;
 class menu_create;
 class menu_play;
+class menu_coop;
 class menu_ss;
 class loading_screen;
 class settings;
@@ -99,6 +100,9 @@ enum {
     ACTION_OPEN_URL,
     ACTION_NEW_GENERATED_LEVEL, /* 70 */
     ACTION_SELF_DESTRUCT,
+    ACTION_GOTO_COOP,
+    ACTION_COOP_HOST,
+    ACTION_COOP_JOIN,
 
     ACTION_IGNORE
 };
@@ -145,6 +149,7 @@ extern class principia {
     menu_main      *s_menu_main;
     menu_create    *s_menu_create;
     menu_play      *s_menu_play;
+    menu_coop      *s_menu_coop;
     menu_ss        *s_menu_ss;
 
     std::vector<pscreen*> screens;

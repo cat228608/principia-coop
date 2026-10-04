@@ -39,9 +39,7 @@ int ctip = -1;
 int ui::next_action = ACTION_IGNORE;
 
 void ui::message(const char *msg, bool long_duration) {
-#ifdef SDL_PLATFORM_ANDROID
-    SDL_ShowAndroidToast(msg, long_duration ? 1 : 0, -1, 0, 0);
-#elif !defined(NO_UI)
+#ifndef NO_UI
     pscreen::message->show(msg, long_duration ? 5.0 : 2.5);
 #endif
 }

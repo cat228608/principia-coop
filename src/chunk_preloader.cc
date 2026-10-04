@@ -1,4 +1,5 @@
 #include "chunk.hh"
+#include "multiplayer.hh"
 #include "world.hh"
 #include "game.hh"
 #include "group.hh"
@@ -747,6 +748,18 @@ chunk_preloader::read_entity(preload_info info)
     entity *e = W->load_entity(&b, W->level.version, 0, b2Vec2(0,0), 0, &this->affected_chunks);
 
     //tms_debugf("read entity at %p, got %p with id %u", (void*)info.ptr, e, e?e->id:0);
+
+    /* co-op: the host may already have streamed this object (MSG_SPAWN)
+     * before our own preloader reached its chunk. A second copy under the
+     * same id breaks the world's id map and crashes the client later. */
+    if (e && mp::is_active()) {
+        entity *existing = W->get_entity_by_id(e->id);
+        if (existing && existing != e) {
+            tms_infof("co-op: preloader skipped object %u, it already exists", e->id);
+            delete e;
+            return existing;
+        }
+    }
 
     if (e) {
         this->loaded_entities.insert(std::make_pair(e->id, e));

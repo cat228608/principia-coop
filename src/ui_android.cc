@@ -1,22 +1,29 @@
-#include <SDL3/SDL.h>
-
-#if defined(SDL_PLATFORM_ANDROID)
-
 #include "adventure.hh"
+#include "anchor.hh"
 #include "animal.hh"
 #include "beam.hh"
+#include "box.hh"
 #include "command.hh"
 #include "decorations.hh"
 #include "display.hh"
+#include "luascript.hh"
+#include "faction.hh"
 #include "factory.hh"
 #include "fxemitter.hh"
+#include "game-message.hh"
 #include "game.hh"
+#include "i0o1gate.hh"
+#include "i1o1gate.hh"
+#include "i2o0gate.hh"
 #include "item.hh"
 #include "jumper.hh"
 #include "key_listener.hh"
+#include "loading_screen.hh"
 #include "main.hh"
 #include "menu-play.hh"
+#include "menu_main.hh"
 #include "object_factory.hh"
+#include "pixel.hh"
 #include "pkgman.hh"
 #include "polygon.hh"
 #include "prompt.hh"
@@ -25,33 +32,37 @@
 #include "sequencer.hh"
 #include "settings.hh"
 #include "sfxemitter.hh"
+#include "simplebg.hh"
+#include "soundman.hh"
 #include "soundmanager.hh"
 #include "speaker.hh"
 #include "timer.hh"
+#include "tpixel.hh"
+#include "treasure_chest.hh"
 #include "ui.hh"
 #include "wheel.hh"
+#include <SDL3/SDL.h>
 #include <sstream>
 #include <tms/cpp.hh>
+
+#if defined(SDL_PLATFORM_ANDROID)
+
+#include <SDL3/SDL.h>
 #include "network.hh"
 #include <jni.h>
 #include <sstream>
 
-#include "imgui.hh"
-#include "ui_imgui.hh"
+void ui::init(){};
 
-static ImguiDriver imgui_driver;
-
-void ui::init() {
-    imgui_driver = ImguiDriver();
-    imgui_driver.init();
-}
-
-void ui::set_next_action(int action_id) {
+void
+ui::set_next_action(int action_id)
+{
     ui::next_action = action_id;
 }
 
 /* TODO: handle this in some way */
-void ui::emit_signal(int signal_id, void *data/*=0*/) {
+void ui::emit_signal(int signal_id, void *data/*=0*/)
+{
     switch (signal_id) {
         case SIGNAL_LOGIN_SUCCESS:
             P.add_action(ui::next_action, 0);
@@ -74,12 +85,28 @@ void ui::emit_signal(int signal_id, void *data/*=0*/) {
         case SIGNAL_REFRESH_BORDERS:
             /* XXX */
             break;
+
+        default:
+            {
+                /* By default, passthrough the signal to the Java part */
+                JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
+                jobject activity = (jobject) SDL_GetAndroidActivity();
+                jclass cls = env->GetObjectClass(activity);
+
+                jmethodID mid = env->GetStaticMethodID(cls, "emit_signal", "(I)V");
+
+                if (mid) {
+                    env->CallStaticVoidMethod(cls, mid, (jvalue*)(jint)signal_id);
+                }
+            }
+            break;
     }
 
     ui::next_action = ACTION_IGNORE;
 }
 
-void ui::open_url(const char *url) {
+void ui::open_url(const char *url)
+{
     JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
     jobject activity = (jobject) SDL_GetAndroidActivity();
     jclass cls = env->GetObjectClass(activity);
@@ -92,12 +119,14 @@ void ui::open_url(const char *url) {
     }
 }
 
-void ui::confirm(const char *text,
+void
+ui::confirm(const char *text,
         const char *button1, principia_action action1,
         const char *button2, principia_action action2,
         const char *button3/*=0*/, principia_action action3/*=ACTION_IGNORE*/,
         struct confirm_data _confirm_data/*=none*/
-        ) {
+        )
+{
     JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
     jobject activity = (jobject) SDL_GetAndroidActivity();
     jclass cls = env->GetObjectClass(activity);
@@ -120,235 +149,98 @@ void ui::confirm(const char *text,
     }
 }
 
-void ui::alert(const char *text, uint8_t alert_type/*=ALERT_INFORMATION*/) {
+void
+ui::alert(const char *text, uint8_t alert_type/*=ALERT_INFORMATION*/)
+{
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Principia", text, NULL);
 }
 
-void ui::open_error_dialog(const char *error_msg) {
+void
+ui::open_error_dialog(const char *error_msg)
+{
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", error_msg, NULL);
 }
 
-void ui::open_dialog(int num, void *data/*=0*/) {
+void
+ui::open_dialog(int num, void *data/*=0*/)
+{
+    if (num == DIALOG_LEVEL_INFO) {
+        JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
+        jobject activity = (jobject) SDL_GetAndroidActivity();
+        jclass cls = env->GetObjectClass(activity);
+
+        jmethodID mid = env->GetStaticMethodID(cls, "showInfoDialog", "(Ljava/lang/String;)V");
+
+        if (mid) {
+            jstring d = env->NewStringUTF((char *)data);
+            env->CallStaticVoidMethod(cls, mid, (jvalue*)d);
+        } else
+            tms_errorf("could not run showInfoDialog");
+
+        return;
+    }
+
     JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
     jobject activity = (jobject) SDL_GetAndroidActivity();
     jclass cls = env->GetObjectClass(activity);
 
-    switch (num) {
-        case DIALOG_SET_FACTION:
-            UiSetFaction::open();
-            break;
+    jmethodID mid = env->GetStaticMethodID(cls, "open_dialog", "(IZ)V");
 
-        case DIALOG_KEY_LISTENER:
-            UiKeyListener::open();
-            break;
-
-        case DIALOG_ANIMAL:
-            UiAnimal::open();
-            break;
-
-        case DIALOG_SANDBOX_MODE:
-            UiSandboxMode::open();
-            break;
-
-        case DIALOG_EVENTLISTENER:
-            UiEventListener::open();
-            break;
-
-        case DIALOG_NEW_LEVEL:
-            UiNewLevel::open();
-            break;
-
-        case DIALOG_SHAPEEXTRUDER:
-            UiShapeExtruder::open();
-            break;
-
-        case DIALOG_CAMTARGETER:
-            UiCamTargeter::open();
-            break;
-
-        case DIALOG_EMITTER:
-            UiEmitter::open();
-            break;
-
-        case DIALOG_POLYGON:
-            UiPolygon::open();
-            break;
-
-        case DIALOG_RUBBER:
-            UiRubber::open();
-            break;
-
-        case DIALOG_VENDOR:
-            UiVendor::open();
-            break;
-
-        case DIALOG_SET_COMMAND:
-            UiCommandPad::open();
-            break;
-
-        case DIALOG_RESOURCE:
-            UiResource::open();
-            break;
-
-        case DIALOG_SET_PKG_LEVEL:
-            UiPkgLvlSelector::open();
-            break;
-
-        case DIALOG_DECORATION:
-            UiDecoration::open();
-            break;
-
-        case DIALOG_FXEMITTER:
-            UiFXEmitter::open();
-            break;
-
-        case DIALOG_VARIABLE:
-            UiVariable::open();
-            break;
-
-        case DIALOG_CURSORFIELD:
-            UiCursorField::open();
-            break;
-
-        case DIALOG_SYNTHESIZER:
-            UiSynthesizer::open();
-            break;
-
-        case DIALOG_DIGITALDISPLAY:
-            UiDigitalDisplay::open();
-            break;
-
-        case DIALOG_SOUNDMAN:
-            UiSoundManager::open();
-            break;
-
-        case DIALOG_SFXEMITTER:
-            UiSfxEmitterLegacy::open();
-            break;
-
-        case DIALOG_SFXEMITTER_2:
-            UiSfxEmitter::open();
-            break;
-
-        case DIALOG_TIMER:
-            UiTimer::open();
-            break;
-
-        case DIALOG_SEQUENCER:
-            UiSequencer::open();
-            break;
-
-        case DIALOG_ITEM:
-            UiItem::open();
-            break;
-
-        case DIALOG_MULTI_CONFIG:
-            UiMultiConfig::open();
-            break;
-
-        case DIALOG_SET_FREQUENCY:
-            UiFrequency::open(false);
-            break;
-
-        case DIALOG_SET_FREQ_RANGE:
-            UiFrequency::open(true);
-            break;
-
-        case DIALOG_SANDBOX_TIPS:
-            UiTips::open();
-            break;
-
-        case DIALOG_QUICKADD:
-            UiQuickadd::open();
-            break;
-
-        case DIALOG_LEVEL_INFO: {
-            jmethodID mid = env->GetStaticMethodID(cls, "showInfoDialog", "(Ljava/lang/String;)V");
-
-            if (mid) {
-                jstring d = env->NewStringUTF((char *)data);
-                env->CallStaticVoidMethod(cls, mid, (jvalue*)d);
-            } else
-                tms_errorf("could not run showInfoDialog");
-            break;
-        }
-
-        default: {
-            jmethodID mid = env->GetStaticMethodID(cls, "open_dialog", "(IZ)V");
-            if (mid)
-                env->CallStaticVoidMethod(cls, mid, (jvalue*)(jint)num, (jboolean)(data ? true : false));
-            break;
-        }
+    if (mid) {
+        env->CallStaticVoidMethod(cls, mid, (jvalue*)(jint)num, (jboolean)(data ? true : false));
     }
 }
 
-void ui::quit() {
+void
+ui::quit()
+{
     _tms.state = TMS_STATE_QUITTING;
 }
 
-void ui::render() {
-    imgui_driver.pre_render();
+void
+ui::open_sandbox_tips()
+{
+    JNIEnv *env = (JNIEnv *) SDL_GetAndroidJNIEnv();
+    jobject activity = (jobject) SDL_GetAndroidActivity();
+    jclass cls = env->GetObjectClass(activity);
 
-    UiSetFaction::layout();
-    UiKeyListener::layout();
-    UiAnimal::layout();
-    UiSandboxMode::layout();
-    UiEventListener::layout();
-    UiNewLevel::layout();
-    UiShapeExtruder::layout();
-    UiCamTargeter::layout();
-    UiEmitter::layout();
-    UiPolygon::layout();
-    UiRubber::layout();
-    UiVendor::layout();
-    UiCommandPad::layout();
-    UiResource::layout();
-    UiPkgLvlSelector::layout();
-    UiDecoration::layout();
-    UiFXEmitter::layout();
-    UiVariable::layout();
-    UiCursorField::layout();
-    UiSynthesizer::layout();
-    UiDigitalDisplay::layout();
-    UiSoundManager::layout();
-    UiSfxEmitter::layout();
-    UiSfxEmitterLegacy::layout();
-    UiTimer::layout();
-    UiSequencer::layout();
-    UiItem::layout();
-    UiMultiConfig::layout();
-    UiFrequency::layout();
-    UiTips::layout();
-    UiQuickadd::layout();
+    jmethodID mid = env->GetStaticMethodID(cls, "showSandboxTips", "()V");
 
-    imgui_driver.post_render();
+    if (mid) {
+        env->CallStaticVoidMethod(cls, mid, 0);
+    } else
+        tms_errorf("could not run showSandboxTips");
 }
-bool ui::is_blocking() { return false; }
 
 /** ++Generic **/
 
-extern "C" {
-
-#define JNI_FUNC(type, name) __attribute__((visibility("default"), used, retain)) type Java_com_bithack_principia_PrincipiaBackend_##name
-
-JNI_FUNC(jstring, getLevelPage)(JNIEnv *env, jclass jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getLevelPage(JNIEnv *env, jclass jcls)
+{
     COMMUNITY_URL("level/%d", W->level.community_id);
 
     return env->NewStringUTF(url);
 }
 
-JNI_FUNC(jstring, getCommunityHost)(JNIEnv *env, jclass jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getCommunityHost(JNIEnv *env, jclass jcls)
+{
     return env->NewStringUTF(P.community_host);
 }
 
-JNI_FUNC(jstring, getCookies)(JNIEnv *env, jclass jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getCookies(JNIEnv *env, jclass jcls)
+{
     char *token;
     P_get_cookie_data(&token);
 
     return env->NewStringUTF(token);
 }
 
-JNI_FUNC(void, addAction)(JNIEnv *env, jclass jcls, jint action_id, jstring action_string) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_addAction(JNIEnv *env, jclass jcls,
+        jint action_id, jstring action_string)
+{
     SDL_LockMutex(P.action_mutex);
     if (P.num_actions < MAX_ACTIONS) {
         P.actions[P.num_actions].id = (int)action_id;
@@ -363,12 +255,18 @@ JNI_FUNC(void, addAction)(JNIEnv *env, jclass jcls, jint action_id, jstring acti
     SDL_UnlockMutex(P.action_mutex);
 }
 
-JNI_FUNC(void, addActionAsInt)(JNIEnv *env, jclass jcls, jint action_id, jlong action_data) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_addActionAsInt(JNIEnv *env, jclass jcls,
+        jint action_id, jlong action_data)
+{
     uint64_t d = (uint64_t)((int64_t)action_data);
     P.add_action(action_id, d);
 }
 
-JNI_FUNC(void, addActionAsVec4)(JNIEnv *env, jclass jcls, jint action_id, jfloat r, jfloat g, jfloat b, jfloat a) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_addActionAsVec4(JNIEnv *env, jclass jcls,
+        jint action_id, jfloat r, jfloat g, jfloat b, jfloat a)
+{
     tvec4 *vec = (tvec4*)malloc(sizeof(tvec4));
     vec->r = r;
     vec->g = g;
@@ -377,14 +275,20 @@ JNI_FUNC(void, addActionAsVec4)(JNIEnv *env, jclass jcls, jint action_id, jfloat
     P.add_action(action_id, (void*)vec);
 }
 
-JNI_FUNC(void, addActionAsPair)(JNIEnv *env, jclass jcls, jint action_id, jlong data0, jlong data1) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_addActionAsPair(JNIEnv *env, jclass jcls,
+        jint action_id, jlong data0, jlong data1)
+{
     uint32_t *vec = (uint32_t*)malloc(sizeof(uint32_t)*2);
     vec[0] = data0;
     vec[1] = data1;
     P.add_action(action_id, (void*)vec);
 }
 
-JNI_FUNC(void, addActionAsTriple)(JNIEnv *env, jclass jcls, jint action_id, jlong data0, jlong data1, jlong data2) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_addActionAsTriple(JNIEnv *env, jclass jcls,
+        jint action_id, jlong data0, jlong data1, jlong data2)
+{
     uint32_t *vec = (uint32_t*)malloc(sizeof(uint32_t)*3);
     vec[0] = data0;
     vec[1] = data1;
@@ -392,7 +296,10 @@ JNI_FUNC(void, addActionAsTriple)(JNIEnv *env, jclass jcls, jint action_id, jlon
     P.add_action(action_id, (void*)vec);
 }
 
-JNI_FUNC(void, openState)(JNIEnv *env, jclass jcls, jint level_type, jint local_id, jint save_id, jboolean from_menu) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_openState(JNIEnv *env, jclass jcls,
+        jint level_type, jint local_id, jint save_id, jboolean from_menu)
+{
     uint32_t *info = (uint32_t*)malloc(sizeof(uint32_t)*3);
     info[0] = level_type;
     info[1] = local_id;
@@ -406,15 +313,23 @@ JNI_FUNC(void, openState)(JNIEnv *env, jclass jcls, jint level_type, jint local_
     P.add_action(ACTION_OPEN_STATE, info);
 }
 
-JNI_FUNC(void, setMultiemitterObject)(JNIEnv *env, jclass jcls, jlong level_id) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setMultiemitterObject(JNIEnv *env, jclass jcls,
+        jlong level_id)
+{
     P.add_action(ACTION_MULTIEMITTER_SET, (uint32_t)level_id);
 }
 
-JNI_FUNC(void, setImportObject)(JNIEnv *env, jclass jcls, jlong level_id) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setImportObject(JNIEnv *env, jclass jcls,
+        jlong level_id)
+{
     P.add_action(ACTION_SELECT_IMPORT_OBJECT, (uint32_t)level_id);
 }
 
-JNI_FUNC(jstring, getPropertyString)(JNIEnv *env, jclass _jcls, jint property_index) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getPropertyString(JNIEnv *env, jclass _jcls, jint property_index)
+{
     char *nm = 0;
     entity *e = G->selection.e;
 
@@ -429,34 +344,46 @@ JNI_FUNC(jstring, getPropertyString)(JNIEnv *env, jclass _jcls, jint property_in
     return env->NewStringUTF(nm);
 }
 
-JNI_FUNC(jlong, getPropertyInt)(JNIEnv *env, jclass _jcls, jint property_index) {
+extern "C" jlong
+Java_com_bithack_principia_PrincipiaBackend_getPropertyInt(JNIEnv *env, jclass _jcls, jint property_index)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT) {
         return (jlong)e->properties[property_index].v.i;
+    }
 
     return 0;
 }
 
-JNI_FUNC(jint, getPropertyInt8)(JNIEnv *env, jclass _jcls, jint property_index) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getPropertyInt8(JNIEnv *env, jclass _jcls, jint property_index)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT8)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT8) {
         return (jint)e->properties[property_index].v.i8;
+    }
 
     return 0;
 }
 
-JNI_FUNC(jfloat, getPropertyFloat)(JNIEnv *env, jclass _jcls, jint property_index) {
+extern "C" jfloat
+Java_com_bithack_principia_PrincipiaBackend_getPropertyFloat(JNIEnv *env, jclass _jcls, jint property_index)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_FLT)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_FLT) {
         return (jfloat)G->selection.e->properties[property_index].v.f;
+    }
 
     return 0.f;
 }
 
-JNI_FUNC(void, setPropertyString)(JNIEnv *env, jclass _jcls, jint property_index, jstring value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPropertyString(JNIEnv *env, jclass _jcls,
+        jint property_index, jstring value)
+{
     entity *e = G->selection.e;
 
     if (e && property_index < e->num_properties && e->properties[property_index].type == P_STR) {
@@ -468,34 +395,149 @@ JNI_FUNC(void, setPropertyString)(JNIEnv *env, jclass _jcls, jint property_index
     }
 }
 
-JNI_FUNC(void, setPropertyInt)(JNIEnv *env, jclass _jcls, jint property_index, jlong value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPropertyInt(JNIEnv *env, jclass _jcls,
+        jint property_index, jlong value)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT) {
         e->properties[property_index].v.i = (uint32_t)value;
-    else
+    } else {
         tms_errorf("Invalid set_property int");
+    }
 }
 
-JNI_FUNC(void, setPropertyInt8)(JNIEnv *env, jclass _jcls, jint property_index, jint value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPropertyInt8(JNIEnv *env, jclass _jcls,
+        jint property_index, jint value)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT8)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_INT8) {
         e->properties[property_index].v.i8 = (uint8_t)value;
-    else
+    } else {
         tms_errorf("Invalid set_property int8");
+    }
 }
 
-JNI_FUNC(void, setPropertyFloat)(JNIEnv *env, jclass _jcls, jint property_index, jfloat value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPropertyFloat(JNIEnv *env, jclass _jcls,
+        jint property_index, jfloat value)
+{
     entity *e = G->selection.e;
 
-    if (e && property_index < e->num_properties && e->properties[property_index].type == P_FLT)
+    if (e && property_index < e->num_properties && e->properties[property_index].type == P_FLT) {
         e->properties[property_index].v.f = (float)value;
-    else
+    } else {
         tms_errorf("Invalid set_property float");
+    }
 }
 
-JNI_FUNC(void, updateJumper)(JNIEnv *env, jclass _jcls, jfloat value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_createObject(JNIEnv *env, jclass _jcls,
+        jstring _name)
+{
+    const char *name = env->GetStringUTFChars(_name, 0);
+    /* there seems to be absolutely no way of retrieving the top completion entry...
+     * we have to find it manually */
+
+    int len = strlen(name);
+    uint32_t gid = 0;
+    entity *found = 0;
+
+    for (int x=0; x<menu_objects.size(); x++) {
+        if (strncasecmp(name, menu_objects[x].e->get_name(), len) == 0) {
+            found = menu_objects[x].e;
+            break;
+        }
+    }
+
+    if (found) {
+        uint32_t g_id = found->g_id;
+        P.add_action(ACTION_CONSTRUCT_ENTITY, g_id);
+    } else
+        tms_infof("'%s' matched no entity name", name);
+
+    env->ReleaseStringUTFChars(_name, name);
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getObjects(JNIEnv *env, jclass _jcls)
+{
+    std::stringstream b("", std::ios_base::app | std::ios_base::out);
+
+    tms_infof("menu_objects size: %d", (int)menu_objects.size());
+    for (int x=0; x<menu_objects.size(); x++) {
+        const char *n = menu_objects[x].e->get_name();
+        if (x != 0) b << ',';
+        b << n;
+    }
+
+    tms_infof("got objects: '%s'", b.str().c_str());
+
+    jstring str;
+    str = env->NewStringUTF(b.str().c_str());
+    return str;
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getSandboxTip(JNIEnv *env, jclass _jcls)
+{
+    jstring str;
+    char *nm = 0;
+
+    if (ctip == -1) ctip = rand()%num_tips_mobile;
+
+    str = env->NewStringUTF(tips_mobile[ctip]);
+
+    ctip = (ctip+1)%num_tips_mobile;
+
+    return str;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_updateRubberEntity(JNIEnv *env, jclass _jcls,
+        jfloat restitution, jfloat friction)
+{
+    entity *e = G->selection.e;
+
+    if (e && (e->g_id == O_WHEEL || e->g_id == O_RUBBER_BEAM)) {
+        e->properties[1].v.f = restitution;
+        e->properties[2].v.f = friction;
+
+        if (e->g_id == O_RUBBER_BEAM) {
+            ((beam*)e)->do_update_fixture = true;
+        } else {
+            ((wheel*)e)->do_update_fixture = true;
+        }
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_updateShapeExtruder(JNIEnv *env, jclass _jcls,
+        jfloat right, jfloat up, jfloat left, jfloat down)
+{
+    entity *e = G->selection.e;
+
+    if (e && e->g_id == O_SHAPE_EXTRUDER) {
+        e->properties[0].v.f = (float)right;
+        e->properties[1].v.f = (float)up;
+        e->properties[2].v.f = (float)left;
+        e->properties[3].v.f = (float)down;
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_updateJumper(JNIEnv *env, jclass _jcls,
+        jfloat value)
+{
     entity *e = G->selection.e;
 
     if (e && e->g_id == O_JUMPER) {
@@ -510,7 +552,9 @@ JNI_FUNC(void, updateJumper)(JNIEnv *env, jclass _jcls, jfloat value) {
     }
 }
 
-JNI_FUNC(jobject, getSettings)(JNIEnv *env, jclass _jcls) {
+extern "C" jobject
+Java_com_bithack_principia_PrincipiaBackend_getSettings(JNIEnv *env, jclass _jcls)
+{
     jobject ret = 0;
     jclass cls = 0;
     jmethodID constructor;
@@ -594,7 +638,10 @@ JNI_FUNC(jobject, getSettings)(JNIEnv *env, jclass _jcls) {
     return ret;
 }
 
-JNI_FUNC(void, setSetting)(JNIEnv *env, jclass _jcls, jstring setting_name, jboolean value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setSetting(JNIEnv *env, jclass _jcls,
+        jstring setting_name, jboolean value)
+{
     const char *str = env->GetStringUTFChars(setting_name, 0);
     tms_infof("Setting setting %s to %s", str, value ? "TRUE" : "FALSE");
     settings[str]->v.b = (bool)value;
@@ -602,7 +649,10 @@ JNI_FUNC(void, setSetting)(JNIEnv *env, jclass _jcls, jstring setting_name, jboo
     env->ReleaseStringUTFChars(setting_name, str);
 }
 
-JNI_FUNC(jboolean, getSettingBool)(JNIEnv *env, jclass _jcls, jstring setting_name) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_getSettingBool(JNIEnv *env, jclass _jcls,
+        jstring setting_name)
+{
     const char *str = env->GetStringUTFChars(setting_name, 0);
     jboolean ret = (jboolean)settings[str]->v.b;
     env->ReleaseStringUTFChars(setting_name, str);
@@ -610,7 +660,10 @@ JNI_FUNC(jboolean, getSettingBool)(JNIEnv *env, jclass _jcls, jstring setting_na
     return ret;
 }
 
-JNI_FUNC(void, login)(JNIEnv *env, jclass _jcls, jstring username, jstring password) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_login(JNIEnv *env, jclass _jcls,
+        jstring username, jstring password)
+{
     const char *tmp_username = env->GetStringUTFChars(username, 0);
     const char *tmp_password = env->GetStringUTFChars(password, 0);
     struct login_data *data = (struct login_data*)malloc(sizeof(struct login_data));
@@ -624,7 +677,10 @@ JNI_FUNC(void, login)(JNIEnv *env, jclass _jcls, jstring username, jstring passw
     P.add_action(ACTION_LOGIN, (void*)data);
 }
 
-JNI_FUNC(void, register)(JNIEnv *env, jclass _jcls, jstring username, jstring email, jstring password) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_register(JNIEnv *env, jclass _jcls,
+        jstring username, jstring email, jstring password)
+{
     const char *tmp_username = env->GetStringUTFChars(username, 0);
     const char *tmp_email = env->GetStringUTFChars(email, 0);
     const char *tmp_password = env->GetStringUTFChars(password, 0);
@@ -641,25 +697,34 @@ JNI_FUNC(void, register)(JNIEnv *env, jclass _jcls, jstring username, jstring em
     P.add_action(ACTION_REGISTER, (void*)data);
 }
 
-JNI_FUNC(void, focusGL)(JNIEnv *env, jclass _jcls, jboolean focus) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_focusGL(JNIEnv *env, jclass _jcls,
+        jboolean focus)
+{
     P.focused = (int)(bool)focus;
-    if (P.focused)
+    if (P.focused) {
         sm::resume_all();
-    else
+    } else {
         sm::pause_all();
-
+    }
     tms_infof("received focus event: %d", (int)(bool)focus);
 }
 
-JNI_FUNC(jboolean, isPaused)(JNIEnv *env, jclass _cls) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_isPaused(JNIEnv *env, jclass _cls)
+{
     return (jboolean)(_tms.is_paused == true);
 }
 
-JNI_FUNC(void, setPaused)(JNIEnv *env, jclass _cls, jboolean b) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPaused(JNIEnv *env, jclass _cls,
+        jboolean b)
+{
     _tms.is_paused = (b ? true : false);
 }
 
-JNI_FUNC(void, setSettings)(JNIEnv *env, jclass _jcls,
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setSettings(JNIEnv *env, jclass _jcls,
         jboolean enable_shadows,
         jboolean enable_ao, jint shadow_quality,
         jint shadow_map_resx, jint shadow_map_resy, jint ao_map_res,
@@ -675,20 +740,22 @@ JNI_FUNC(void, setSettings)(JNIEnv *env, jclass _jcls,
         jboolean hide_tips,
         jboolean sandbox_back_dna,
         jint display_fps
-        ) {
+        )
+{
     bool do_reload_graphics = false;
-    if (settings["enable_shadows"]->v.b != (bool)enable_shadows)
+    if (settings["enable_shadows"]->v.b != (bool)enable_shadows) {
         do_reload_graphics = true;
-    else if (settings["enable_ao"]->v.b != (bool)enable_ao)
+    } else if (settings["enable_ao"]->v.b != (bool)enable_ao) {
         do_reload_graphics = true;
-    else if (settings["shadow_quality"]->v.u8 != (int)shadow_quality)
+    } else if (settings["shadow_quality"]->v.u8 != (int)shadow_quality) {
         do_reload_graphics = true;
-    else if (settings["shadow_map_resx"]->v.i != (int)shadow_map_resx)
+    } else if (settings["shadow_map_resx"]->v.i != (int)shadow_map_resx) {
         do_reload_graphics = true;
-    else if (settings["shadow_map_resy"]->v.i != (int)shadow_map_resy)
+    } else if (settings["shadow_map_resy"]->v.i != (int)shadow_map_resy)  {
         do_reload_graphics = true;
-    else if (settings["ao_map_res"]->v.i != (int)ao_map_res)
+    } else if (settings["ao_map_res"]->v.i != (int)ao_map_res) {
         do_reload_graphics = true;
+    }
 
     if (do_reload_graphics) {
         P.can_reload_graphics = false;
@@ -709,9 +776,9 @@ JNI_FUNC(void, setSettings)(JNIEnv *env, jclass _jcls,
     settings["shadow_map_resy"]->v.i = (int)shadow_map_resy;
     settings["ao_map_res"]->v.i = (int)ao_map_res;
 
-    if (settings["uiscale"]->set((float)uiscale))
+    if (settings["uiscale"]->set((float)uiscale)) {
         ui::message("You need to restart Principia before the UI scale change takes effect.");
-
+    }
     settings["cam_speed_modifier"]->v.f = (float)cam_speed;
     settings["zoom_speed"]->v.f = (float)zoom_speed;
     settings["smooth_cam"]->v.b = (bool)smooth_cam;
@@ -750,15 +817,21 @@ JNI_FUNC(void, setSettings)(JNIEnv *env, jclass _jcls,
 }
 
 /** ++Prompt **/
-JNI_FUNC(void, setPromptResponse)(JNIEnv *env, jclass _jcls, jint new_response) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPromptResponse(JNIEnv *env, jclass _jcls, jint new_response)
+{
     if (G->current_prompt) {
         base_prompt *bp = G->current_prompt->get_base_prompt();
-        if (bp)
+        if (bp) {
             bp->set_response((uint8_t)new_response);
+        }
     }
 }
 
-JNI_FUNC(void, setPromptPropertyString)(JNIEnv *env, jclass _jcls, jint property_index, jstring value) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPromptPropertyString(JNIEnv *env, jclass _jcls,
+        jint property_index, jstring value)
+{
     if (G->current_prompt) {
         const char *tmp = env->GetStringUTFChars(value, 0);
         G->current_prompt->set_property(property_index, tmp);
@@ -766,7 +839,9 @@ JNI_FUNC(void, setPromptPropertyString)(JNIEnv *env, jclass _jcls, jint property
     }
 }
 
-JNI_FUNC(jstring, getPromptPropertyString)(JNIEnv *env, jclass _jcls, jint property_index) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getPromptPropertyString(JNIEnv *env, jclass _jcls, jint property_index)
+{
     char *nm = 0;
 
     if (G->current_prompt) {
@@ -776,13 +851,16 @@ JNI_FUNC(jstring, getPromptPropertyString)(JNIEnv *env, jclass _jcls, jint prope
         tms_infof("Current prompt is not set!");
     }
 
-    if (nm == 0)
+    if (nm == 0) {
         return env->NewStringUTF("");
+    }
 
     return env->NewStringUTF(nm);
 }
 
-JNI_FUNC(void, refreshPrompt)(JNIEnv *env, jclass _jcls) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_refreshPrompt(JNIEnv *env, jclass _jcls)
+{
     if (G->current_prompt) {
         ui::message("Prompt properties saved!");
         G->current_prompt = 0;
@@ -790,127 +868,400 @@ JNI_FUNC(void, refreshPrompt)(JNIEnv *env, jclass _jcls) {
 }
 
 /** ++Sticky **/
-JNI_FUNC(jboolean, getStickyCenterHoriz)(JNIEnv *env, jclass _jcls) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_getStickyCenterHoriz(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->g_id == 60)
         return (jboolean)G->selection.e->properties[1].v.i8;
 
     return JNI_FALSE;
 }
 
-JNI_FUNC(jboolean, getStickyCenterVert)(JNIEnv *env, jclass _jcls) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_getStickyCenterVert(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->g_id == 60)
         return (jboolean)G->selection.e->properties[2].v.i8;
 
     return JNI_FALSE;
 }
 
-JNI_FUNC(jint, getStickySize)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getStickySize(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->g_id == 60)
         return (jint)G->selection.e->properties[3].v.i8;
 
     return 0;
 }
 
-JNI_FUNC(jstring, getStickyText)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getStickyText(JNIEnv *env, jclass _jcls)
+{
     jstring str;
     char *nm = 0;
 
-    if (G->selection.e && G->selection.e->g_id == 60)
+    if (G->selection.e && G->selection.e->g_id == 60) {
         nm = G->selection.e->properties[0].v.s.buf;
+    }
 
-    if (nm == 0)
+    if (nm == 0) {
         return env->NewStringUTF("");
+    }
 
     return env->NewStringUTF(nm);
 }
 
-JNI_FUNC(jstring, getCurrentCommunityUrl)(JNIEnv *env, jclass _jcls) {
+/** ++Cam targeter **/
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getCamTargeterFollowMode(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && G->selection.e->g_id == 133)
+        return (jint)G->selection.e->properties[1].v.i;
+
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setCamTargeterFollowMode(
+        JNIEnv *env, jclass _jcls,
+        jint follow_mode)
+{
+    if (G->selection.e && G->selection.e->g_id == 133) {
+        G->selection.e->properties[1].v.i = follow_mode;
+
+        ui::message("Cam targeter properties saved!");
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getConsumables(JNIEnv *env, jclass _jcls)
+{
+    std::stringstream b("", std::ios_base::app | std::ios_base::out);
+
+    for (int x=0; x<NUM_ITEMS; x++) {
+        if (x != 0) b << ',';
+        b << item_options[x].name;
+    }
+
+    jstring str;
+    str = env->NewStringUTF(b.str().c_str());
+    return str;
+}
+
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getConsumableType(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && G->selection.e->g_id == O_ITEM) {
+        return (jint)(((item*)G->selection.e)->get_item_type());
+    }
+
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setConsumableType(JNIEnv *env, jclass _jcls, jint t)
+{
+    if (G->selection.e && G->selection.e->g_id == O_ITEM) {
+        tms_debugf("New item type: %d", t);
+        ((item*)G->selection.e)->set_item_type(t);
+        ((item*)G->selection.e)->do_recreate_shape = true;
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getCurrentCommunityUrl(JNIEnv *env, jclass _jcls)
+{
     COMMUNITY_URL("level/%d", W->level.community_id);
 
     return env->NewStringUTF(url);
 }
 
-JNI_FUNC(jint, getLevelIdType)(JNIEnv *env, jclass _jcls) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setGameMode(JNIEnv *env, jclass _jcls, jint mode)
+{
+    G->set_mode(mode);
+}
+
+/** ++Command pad **/
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getCommandPadCommand(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && G->selection.e->g_id == 64) {
+        return (jint)((command*)G->selection.e)->get_command();
+    }
+
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setCommandPadCommand(
+        JNIEnv *env, jclass _jcls,
+        jint cmd)
+{
+    if (G->selection.e && G->selection.e->g_id == 64) {
+        ((command*)G->selection.e)->set_command(cmd);
+
+        ui::message("Command pad properties saved!");
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+/** ++FX Emitter **/
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getFxEmitterEffects(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && G->selection.e->g_id == 135) {
+        entity *e = G->selection.e;
+        char effects[128];
+
+        sprintf(effects, "%u,%u,%u,%u",
+                e->properties[3+0].v.i, e->properties[3+1].v.i,
+                e->properties[3+2].v.i, e->properties[3+3].v.i);
+
+        jstring str;
+        str = env->NewStringUTF(effects);
+
+        return str;
+    }
+
+    /* XXX: Will this break? */
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setFxEmitterEffects(
+        JNIEnv *env, jclass _jcls,
+        jint effect_1, jint effect_2, jint effect_3, jint effect_4)
+{
+    if (G->selection.e && G->selection.e->g_id == 135) {
+        entity *e = G->selection.e;
+
+        if (effect_1 == 0) {
+            e->properties[3+0].v.i = FX_INVALID;
+        } else {
+            e->properties[3+0].v.i = effect_1 - 1;
+        }
+
+        if (effect_2 == 0) {
+            e->properties[3+1].v.i = FX_INVALID;
+        } else {
+            e->properties[3+1].v.i = effect_2 - 1;
+        }
+
+        if (effect_3 == 0) {
+            e->properties[3+2].v.i = FX_INVALID;
+        } else {
+            e->properties[3+2].v.i = effect_3 - 1;
+        }
+
+        if (effect_4 == 0) {
+            e->properties[3+3].v.i = FX_INVALID;
+        } else {
+            e->properties[3+3].v.i = effect_4 - 1;
+        }
+
+        ui::message("FX Emitter properties saved!");
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+/** ++Event Listener **/
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getEventListenerEventType(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && G->selection.e->g_id == 156) {
+        return (jint)G->selection.e->properties[0].v.i;
+    }
+
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setEventListenerEventType(
+        JNIEnv *env, jclass _jcls,
+        jint event_type)
+{
+    if (G->selection.e && G->selection.e->g_id == 156) {
+        G->selection.e->properties[0].v.i = event_type;
+
+        ui::message("Event listener properties saved!");
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+/** ++Package level chooser **/
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getPkgItemLevelId(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e && (G->selection.e->g_id == 131 || G->selection.e->g_id == 132)) {
+        return (jint)G->selection.e->properties[0].v.i8;
+    }
+
+    return 0;
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setPkgItemLevelId(
+        JNIEnv *env, jclass _jcls,
+        jint level_id)
+{
+    if (G->selection.e && (G->selection.e->g_id == 131 || G->selection.e->g_id == 132)) {
+        G->selection.e->properties[0].v.i8 = level_id;
+
+        ui::message("Package object properties saved!");
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_resetVariable(
+        JNIEnv *env, jclass _jcls,
+        jstring variable_name)
+{
+    const char *vn = env->GetStringUTFChars(variable_name, 0);
+
+    std::map<std::string, float>::size_type num_deleted = W->level_variables.erase(vn);
+    if (num_deleted != 0) {
+        if (W->save_cache(W->level_id_type, W->level.local_id)) {
+            ui::message("Successfully deleted data for this variable");
+        } else {
+            ui::message("Unable to delete variable data for this level.");
+        }
+    } else {
+        ui::message("No data found for this variable");
+    }
+
+    env->ReleaseStringUTFChars(variable_name, vn);
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_resetAllVariables(
+        JNIEnv *env, jclass _jcls)
+{
+    W->level_variables.clear();
+    if (W->save_cache(W->level_id_type, W->level.local_id)) {
+        ui::message("All level-specific variables cleared.");
+    } else {
+        ui::message("Unable to delete variable data for this level.");
+    }
+}
+
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getLevelIdType(
+        JNIEnv *env, jclass _jcls)
+{
     return W->level_id_type;
 }
 
-JNI_FUNC(jstring, getEquipmentsHeadEquipment)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsHeadEquipment(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_HEAD_EQUIPMENT_TYPES; ++x) {
         uint32_t item_id = _head_equipment_to_item[x];
         const struct item_option &i = item_options[item_id];
 
-        if (x == 0)
+        if (x == 0) {
             ss << "None,";
-        else
+        } else {
             ss << i.name << ",";
+        }
     }
 
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsHead)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsHead(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_HEAD_TYPES; ++x) {
         const struct item_option &i = item_options[_head_to_item[x]];
 
-        if (x == 0)
+        if (x == 0) {
             ss << "None,";
-        else
+        } else {
             ss << i.name << ",";
+        }
     }
 
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsBackEquipment)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsBackEquipment(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_BACK_EQUIPMENT_TYPES; ++x) {
         const struct item_option &i = item_options[_back_to_item[x]];
 
-        if (x == 0)
+        if (x == 0) {
             ss << "None,";
-        else
+        } else {
             ss << i.name << ",";
+        }
     }
 
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsFrontEquipment)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsFrontEquipment(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_FRONT_EQUIPMENT_TYPES; ++x) {
         const struct item_option &i = item_options[_front_to_item[x]];
 
-        if (x == 0)
+        if (x == 0) {
             ss << "None,";
-        else
+        } else {
             ss << i.name << ",";
+        }
     }
 
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsFeet)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsFeet(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_FEET_TYPES; ++x) {
         const struct item_option &i = item_options[_feet_to_item[x]];
 
-        if (x == 0)
+        if (x == 0) {
             ss << "None,";
-        else
+        } else {
             ss << i.name << ",";
+        }
     }
 
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsBoltSet)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsBoltSet(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=0; x<NUM_BOLT_SETS; ++x) {
@@ -922,7 +1273,10 @@ JNI_FUNC(jstring, getEquipmentsBoltSet)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsWeapons)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsWeapons(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=1; x<NUM_WEAPONS; ++x) {
@@ -935,13 +1289,17 @@ JNI_FUNC(jstring, getEquipmentsWeapons)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getEquipmentsTools)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getEquipmentsTools(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     for (int x=1; x<NUM_TOOLS; ++x) {
         uint32_t item_id = _tool_to_item[x];
-        if (item_id == 0)
+        if (item_id == 0) {
             continue;
+        }
 
         const struct item_option &i = item_options[_tool_to_item[x]];
 
@@ -951,18 +1309,23 @@ JNI_FUNC(jstring, getEquipmentsTools)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getCompatibleCircuits)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getCompatibleCircuits(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
-    if (!G->selection.e || !G->selection.e->is_robot())
+    if (!G->selection.e || !G->selection.e->is_robot()) {
         return env->NewStringUTF("");
+    }
 
     robot_base *r = static_cast<robot_base*>(G->selection.e);
 
     for (int x=0; x<NUM_CIRCUITS; ++x) {
         uint32_t item_id = _circuit_flag_to_item(1ULL << x);
-        if (item_id == 0)
+        if (item_id == 0) {
             continue;
+        }
 
         if ((1ULL << x) & r->circuits_compat) {
             const struct item_option &i = item_options[item_id];
@@ -973,7 +1336,10 @@ JNI_FUNC(jstring, getCompatibleCircuits)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(void, fixed)(JNIEnv *env, jclass _jcls) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_fixed(
+        JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e) {
         entity *e = G->selection.e;
 
@@ -1001,7 +1367,80 @@ JNI_FUNC(void, fixed)(JNIEnv *env, jclass _jcls) {
     }
 }
 
-JNI_FUNC(jstring, getRobotData)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getKeys(
+        JNIEnv *env, jclass _jcls)
+{
+    std::stringstream ss;
+
+    for (int x=0; x<TMS_KEY__NUM; ++x) {
+        const char *s = key_names[x];
+
+        if (s) {
+            // ;-)
+            ss << x << "=_=" << s << ",.,";
+        }
+    }
+
+    return env->NewStringUTF(ss.str().c_str());
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getDecorations(
+        JNIEnv *env, jclass _jcls)
+{
+    std::stringstream ss;
+
+    for (int x=0; x<NUM_DECORATIONS; ++x) {
+        ss << decorations[x].name << ",.,";
+    }
+
+    return env->NewStringUTF(ss.str().c_str());
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getAnimals(
+        JNIEnv *env, jclass _jcls)
+{
+    std::stringstream ss;
+
+    for (int x=0; x<NUM_ANIMAL_TYPES; ++x) {
+        ss << animal_data[x].name << ",.,";
+    }
+
+    return env->NewStringUTF(ss.str().c_str());
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getSounds(
+        JNIEnv *env, jclass _jcls)
+{
+    std::stringstream ss;
+
+    for (int x=0; x<SND__NUM; x++) {
+        ss << sm::sound_lookup[x]->name << ",.,";
+    }
+
+    return env->NewStringUTF(ss.str().c_str());
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setResourceType(JNIEnv *env, jclass _jcls,
+        jlong value)
+{
+    entity *e = G->selection.e;
+
+    if (e && e->g_id == O_RESOURCE) {
+        ((resource*)e)->set_resource_type((uint32_t)value);
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getRobotData(
+        JNIEnv *env, jclass _jcls)
+{
     std::stringstream ss;
 
     if (!G->selection.e || !G->selection.e->is_robot()) {
@@ -1032,9 +1471,13 @@ JNI_FUNC(jstring, getRobotData)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(ss.str().c_str());
 }
 
-JNI_FUNC(jstring, getRobotEquipment)(JNIEnv *env, jclass _jcls) {
-    if (!G->selection.e || !G->selection.e->is_robot())
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getRobotEquipment(
+        JNIEnv *env, jclass _jcls)
+{
+    if (!G->selection.e || !G->selection.e->is_robot()) {
         return env->NewStringUTF("");
+    }
 
     robot_base *r = static_cast<robot_base*>(G->selection.e);
 
@@ -1042,7 +1485,9 @@ JNI_FUNC(jstring, getRobotEquipment)(JNIEnv *env, jclass _jcls) {
 }
 
 /** ++Color Chooser **/
-JNI_FUNC(jint, getEntityColor)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getEntityColor(JNIEnv *env, jclass _jcls)
+{
     int color = 0;
 
     if (G->selection.e) {
@@ -1058,7 +1503,11 @@ JNI_FUNC(jint, getEntityColor)(JNIEnv *env, jclass _jcls) {
     return (jint)color;
 }
 
-JNI_FUNC(void, setEntityColor)(JNIEnv *env, jclass _jcls, jint color) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setEntityColor(
+        JNIEnv *env, jclass _jcls,
+        jint color)
+{
     int alpha;
     float r,g,b;
     alpha = ((color & 0xFF000000) >> 24);
@@ -1083,22 +1532,107 @@ JNI_FUNC(void, setEntityColor)(JNIEnv *env, jclass _jcls, jint color) {
     }
 }
 
-JNI_FUNC(jfloat, getEntityAlpha)(JNIEnv *env, jclass _jcls, jfloat alpha) {
+extern "C" jfloat
+Java_com_bithack_principia_PrincipiaBackend_getEntityAlpha(
+        JNIEnv *env, jclass _jcls,
+        jfloat alpha)
+{
     jfloat a = 1.f;
 
-    if (G->selection.e && G->selection.e->g_id == O_PIXEL)
+    if (G->selection.e && G->selection.e->g_id == O_PIXEL) {
         a = (jfloat)(G->selection.e->properties[4].v.i8 / 255);
+    }
 
     return a;
 }
 
-JNI_FUNC(void, setEntityAlpha)(JNIEnv *env, jclass _jcls, jfloat alpha) {
-    if (G->selection.e && G->selection.e->g_id == O_PIXEL)
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setEntityAlpha(
+        JNIEnv *env, jclass _jcls,
+        jfloat alpha)
+{
+    if (G->selection.e && G->selection.e->g_id == O_PIXEL) {
         G->selection.e->properties[4].v.i8 = (uint8_t)(alpha * 255);
+    }
+}
+
+/** ++Digital Display **/
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setDigitalDisplayStuff(
+        JNIEnv *env, jclass _jcls,
+        jboolean wrap_around,
+        jint initial_position,
+        jstring new_symbols)
+{
+    entity *e = G->selection.e;
+
+    if (e && (e->g_id == O_PASSIVE_DISPLAY || e->g_id == O_ACTIVE_DISPLAY)) {
+        display *d = static_cast<display*>(e);
+        const char *symbols = env->GetStringUTFChars(new_symbols, 0);
+
+        d->properties[0].v.i8 = (wrap_around?1:0);
+        d->properties[1].v.i8 = initial_position;
+        d->set_property(2, symbols);
+
+        d->set_active_symbol(initial_position);
+        d->load_symbols();
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+
+        env->ReleaseStringUTFChars(new_symbols, symbols);
+    }
+}
+
+/** ++Frequency Dialog **/
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setFrequency(
+        JNIEnv *env, jclass _jcls,
+        jlong frequency)
+{
+    if (G->selection.e && G->selection.e->is_wireless()) {
+        int64_t f = (int64_t)frequency;
+
+        if (f < 0) f = 0;
+
+        G->selection.e->properties[0].v.i = (uint32_t)f;
+
+        ui::messagef("Frequency set to %u", G->selection.e->properties[0].v.i);
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setFrequencyRange(
+        JNIEnv *env, jclass _jcls,
+        jlong frequency, jlong range)
+{
+    if (G->selection.e && G->selection.e->g_id == 125) {
+        int64_t f, r;
+        f = (int64_t)frequency;
+        r = (int64_t)range;
+
+        if (f < 0) f = 0;
+        if (r < 0) r = 0;
+
+        G->selection.e->properties[0].v.i = (uint32_t)f;
+        G->selection.e->properties[1].v.i = (uint32_t)r;
+
+        ui::messagef("Frequency set to %u (+%u)", G->selection.e->properties[0].v.i, G->selection.e->properties[1].v.i);
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
 }
 
 /** ++Export **/
-JNI_FUNC(void, saveObject)(JNIEnv *env, jclass _jcls, jstring name) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_saveObject(
+        JNIEnv *env, jclass _jcls,
+        jstring name)
+{
     const char *tmp = env->GetStringUTFChars(name, 0);
     char *_name = strdup(tmp);
 
@@ -1108,29 +1642,104 @@ JNI_FUNC(void, saveObject)(JNIEnv *env, jclass _jcls, jstring name) {
     env->ReleaseStringUTFChars(name, tmp);
 }
 
+/** ++Sequencer **/
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setSequencerData(
+        JNIEnv *env, jclass _jcls,
+        jstring _sequence,
+        jint _seconds, jint _milliseconds,
+        jboolean _wrap_around)
+{
+    entity *e = G->selection.e;
+
+    if (e && e->g_id == O_SEQUENCER) {
+        const char *sequence = env->GetStringUTFChars(_sequence, 0);
+        uint32_t seconds = (uint32_t)_seconds;
+        uint32_t milliseconds = (uint32_t)_milliseconds;
+        uint32_t full_time = (seconds * 1000) + milliseconds;
+        uint8_t wrap_around = _wrap_around ? 1 : 0;
+
+        if (full_time < TIMER_MIN_TIME)
+            full_time = TIMER_MIN_TIME;
+
+        e->set_property(0, sequence);
+        e->properties[1].v.i = full_time;
+        e->properties[2].v.i8 = wrap_around;
+
+        ((sequencer*)e)->refresh_sequence();
+
+        ui::message("Sequencer properties saved!");
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
+/** ++Timer **/
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setTimerData(
+        JNIEnv *env, jclass _jcls,
+        jint _seconds, jint _milliseconds, jint _num_ticks, jboolean use_system_time)
+{
+    entity *e = G->selection.e;
+
+    if (e && e->g_id == O_TIMER) {
+        uint32_t seconds = (uint32_t)_seconds;
+        uint32_t milliseconds = (uint32_t)_milliseconds;
+        uint32_t full_time = (seconds * 1000) + milliseconds;
+        uint8_t num_ticks = (uint8_t)_num_ticks;
+
+        if (full_time < TIMER_MIN_TIME) {
+            full_time = TIMER_MIN_TIME;
+        }
+
+        e->properties[0].v.i = full_time;
+        e->properties[1].v.i8 = num_ticks;
+        e->properties[2].v.i = use_system_time ? 1 : 0;
+
+        ui::message("Timer properties saved!");
+
+        P.add_action(ACTION_HIGHLIGHT_SELECTED, 0);
+        P.add_action(ACTION_RESELECT, 0);
+    }
+}
+
 /** ++Robot **/
-JNI_FUNC(jint, getRobotState)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getRobotState(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->flag_active(ENTITY_IS_ROBOT))
         return (jint)G->selection.e->properties[1].v.i8;
 
     return 0;
 }
 
-JNI_FUNC(jboolean, getRobotRoam)(JNIEnv *env, jclass _jcls) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_getRobotRoam(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->flag_active(ENTITY_IS_ROBOT))
         return (jboolean)G->selection.e->properties[2].v.i8;
 
     return JNI_FALSE;
 }
 
-JNI_FUNC(jint, getRobotDir)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getRobotDir(JNIEnv *env, jclass _jcls)
+{
     if (G->selection.e && G->selection.e->flag_active(ENTITY_IS_ROBOT))
         return (jint)G->selection.e->properties[4].v.i8;
 
     return 0;
 }
 
-JNI_FUNC(void, setRobotStuff)(JNIEnv *env, jclass _jcls, jint state, jint faction, jboolean roam, jint dir) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setRobotStuff(
+        JNIEnv *env, jclass _jcls,
+        jint state,
+        jint faction,
+        jboolean roam,
+        jint dir)
+{
 
     if (G->selection.e && G->selection.e->flag_active(ENTITY_IS_ROBOT)) {
         G->selection.e->properties[1].v.i8 = state;
@@ -1155,7 +1764,10 @@ JNI_FUNC(void, setRobotStuff)(JNIEnv *env, jclass _jcls, jint state, jint factio
 static char *_tmp_args[2];
 static char _tmp_arg1[256];
 
-JNI_FUNC(void, setarg)(JNIEnv *env, jclass _jcls, jstring arg) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setarg(JNIEnv *env, jclass _jcls,
+        jstring arg)
+{
     _tmp_args[0] = 0;
     _tmp_args[1] = _tmp_arg1;
 
@@ -1173,7 +1785,10 @@ JNI_FUNC(void, setarg)(JNIEnv *env, jclass _jcls, jstring arg) {
     env->ReleaseStringUTFChars(arg, tmp);
 }
 
-JNI_FUNC(void, setLevelName)(JNIEnv *env, jclass _jcls, jstring name) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelName(JNIEnv *env, jclass _jcls,
+        jstring name)
+{
     const char *tmp = env->GetStringUTFChars(name, 0);
     int len = env->GetStringUTFLength(name);
 
@@ -1187,7 +1802,9 @@ JNI_FUNC(void, setLevelName)(JNIEnv *env, jclass _jcls, jstring name) {
     env->ReleaseStringUTFChars(name, tmp);
 }
 
-JNI_FUNC(jstring, getLevelName)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getLevelName(JNIEnv *env, jclass _jcls)
+{
     jstring str;
     char tmp[257];
 
@@ -1200,7 +1817,9 @@ JNI_FUNC(jstring, getLevelName)(JNIEnv *env, jclass _jcls) {
     return str;
 }
 
-JNI_FUNC(jstring, getLevels)(JNIEnv *env, jclass _jcls, jint level_type) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getLevels(JNIEnv *env, jclass _jcls, jint level_type)
+{
     std::stringstream b("", std::ios_base::app | std::ios_base::out);
 
     lvlfile *level = pkgman::get_levels((int)level_type);
@@ -1223,22 +1842,71 @@ JNI_FUNC(jstring, getLevels)(JNIEnv *env, jclass _jcls, jint level_type) {
     return str;
 }
 
-JNI_FUNC(jboolean, isAdventure)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getSelectionGid(JNIEnv *env, jclass _jcls)
+{
+    if (G->selection.e) {
+        return (jint)G->selection.e->g_id;
+    }
+
+    return 0;
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getSfxSounds(JNIEnv *env, jclass _jcls)
+{
+    std::stringstream b("", std::ios_base::app | std::ios_base::out);
+
+    for (int x=0; x<NUM_SFXEMITTER_OPTIONS; x++) {
+        if (x != 0) b << ',';
+        b << sfxemitter_options[x].name;
+    }
+
+    jstring str;
+    str = env->NewStringUTF(b.str().c_str());
+    return str;
+}
+
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_isAdventure(JNIEnv *env, jclass _jcls)
+{
     return (jboolean)W->is_adventure();
 }
 
-JNI_FUNC(jint, getLevelType)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getLevelType(JNIEnv *env, jclass _jcls)
+{
     tms_infof("Level type: %d", W->level.type);
     return (jint)W->level.type;
 }
 
-JNI_FUNC(void, setLevelType)(JNIEnv *env, jclass _jcls, jint type) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelType(JNIEnv *env, jclass _jcls,
+        jint type)
+{
     if (type >= LCAT_PUZZLE && type <= LCAT_CUSTOM) {
         P.add_action(ACTION_SET_LEVEL_TYPE, (void*)type);
     }
 }
 
-JNI_FUNC(jstring, getAvailableBgs)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getSynthWaveforms(JNIEnv *env, jclass _jcls)
+{
+    std::stringstream b("", std::ios_base::app | std::ios_base::out);
+
+    for (int x=0; x<NUM_WAVEFORMS; x++) {
+        if (x != 0) b << ',';
+        b << speaker_options[x];
+    }
+
+    jstring str;
+    str = env->NewStringUTF(b.str().c_str());
+    return str;
+}
+
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getAvailableBgs(JNIEnv *env, jclass _jcls)
+{
     std::stringstream b("", std::ios_base::app | std::ios_base::out);
 
     for (int x=0; x<num_bgs; ++x) {
@@ -1251,7 +1919,9 @@ JNI_FUNC(jstring, getAvailableBgs)(JNIEnv *env, jclass _jcls) {
     return str;
 }
 
-JNI_FUNC(jstring, getLevelDescription)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getLevelDescription(JNIEnv *env, jclass _jcls)
+{
     char *descr = W->level.descr;
     if (descr == 0 || W->level.descr_len == 0) {
         return env->NewStringUTF("");
@@ -1260,7 +1930,10 @@ JNI_FUNC(jstring, getLevelDescription)(JNIEnv *env, jclass _jcls) {
     return env->NewStringUTF(descr);
 }
 
-JNI_FUNC(void, setLevelDescription)(JNIEnv *env, jclass _jcls, jstring descr) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelDescription(JNIEnv *env, jclass _jcls,
+        jstring descr)
+{
     lvlinfo *l = &W->level;
     const char *tmp = env->GetStringUTFChars(descr, 0);
     int len = env->GetStringUTFLength(descr);
@@ -1284,7 +1957,9 @@ JNI_FUNC(void, setLevelDescription)(JNIEnv *env, jclass _jcls, jstring descr) {
     tms_debugf("New description: '%s'", l->descr);
 }
 
-JNI_FUNC(jstring, getFactoryResources)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getFactoryResources(JNIEnv *env, jclass _jcls)
+{
     char info[2048];
     char *target = info;
 
@@ -1303,7 +1978,9 @@ JNI_FUNC(jstring, getFactoryResources)(JNIEnv *env, jclass _jcls) {
 }
 
 /* Returns a list of all resources, including "Oil" */
-JNI_FUNC(jstring, getResources)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getResources(JNIEnv *env, jclass _jcls)
+{
     char info[2048];
 
     strcpy(info, "Oil");
@@ -1318,11 +1995,15 @@ JNI_FUNC(jstring, getResources)(JNIEnv *env, jclass _jcls) {
     return str;
 }
 
-JNI_FUNC(jint, getFactoryNumExtraProperties)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getFactoryNumExtraProperties(JNIEnv *env, jclass _jcls)
+{
     return FACTORY_NUM_EXTRA_PROPERTIES;
 }
 
-JNI_FUNC(jstring, getRecipes)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getRecipes(JNIEnv *env, jclass _jcls)
+{
     char info[2048];
     char *target = info;
 
@@ -1360,7 +2041,9 @@ JNI_FUNC(jstring, getRecipes)(JNIEnv *env, jclass _jcls) {
     return str;
 }
 
-JNI_FUNC(jstring, getLevelInfo)(JNIEnv *env, jclass _jcls) {
+extern "C" jstring
+Java_com_bithack_principia_PrincipiaBackend_getLevelInfo(JNIEnv *env, jclass _jcls)
+{
     char info[2048];
 
     lvlinfo *l = &W->level;
@@ -1423,17 +2106,28 @@ JNI_FUNC(jstring, getLevelInfo)(JNIEnv *env, jclass _jcls) {
     return str;
 }
 
-JNI_FUNC(jint, getLevelVersion)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getLevelVersion(JNIEnv *env, jclass _jcls)
+{
     lvlinfo *l = &W->level;
 
     return (jint)l->version;
 }
 
-JNI_FUNC(jint, getMaxLevelVersion)(JNIEnv *env, jclass _jcls) {
+extern "C" jint
+Java_com_bithack_principia_PrincipiaBackend_getMaxLevelVersion(JNIEnv *env, jclass _jcls)
+{
     return (jint)LEVEL_VERSION;
 }
 
-JNI_FUNC(void, setStickyStuff)(JNIEnv *env, jclass _jcls, jstring text, jint center_horiz, jint center_vert, jint size) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setStickyStuff(
+        JNIEnv *env, jclass _jcls,
+        jstring text,
+        jint center_horiz, jint center_vert,
+        jint size)
+{
+
     if (G->selection.e && G->selection.e->g_id == O_STICKY_NOTE) {
         const char *tmp = env->GetStringUTFChars(text, 0);
         G->selection.e->set_property(0, tmp);
@@ -1446,13 +2140,18 @@ JNI_FUNC(void, setStickyStuff)(JNIEnv *env, jclass _jcls, jstring text, jint cen
     }
 }
 
-JNI_FUNC(void, setLevelLocked)(JNIEnv *env, jclass _jcls, jboolean locked) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelLocked(
+        JNIEnv *env, jclass _jcls,
+        jboolean locked)
+{
     lvlinfo *l = &W->level;
 
     l->visibility = ((bool)locked ? LEVEL_LOCKED : LEVEL_VISIBLE);
 }
 
-JNI_FUNC(void, setLevelInfo)(
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelInfo(
         JNIEnv *env, jclass _jcls,
         jint bg,
         jint border_left, jint border_right, jint border_bottom, jint border_top,
@@ -1467,7 +2166,8 @@ JNI_FUNC(void, setLevelInfo)(
         jfloat joint_friction,
         jfloat dead_enemy_absorb_time,
         jfloat time_before_player_can_respawn
-        ) {
+        )
+{
     lvlinfo *l = &W->level;
 
     /**
@@ -1527,13 +2227,21 @@ JNI_FUNC(void, setLevelInfo)(
     P.add_action(ACTION_RELOAD_LEVEL, 0);
 }
 
-JNI_FUNC(void, resetLevelFlags)(JNIEnv *env, jclass _jcls, jlong flag) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_resetLevelFlags(
+        JNIEnv *env, jclass _jcls,
+        jlong flag)
+{
     lvlinfo *l = &W->level;
 
     l->flags = 0;
 }
 
-JNI_FUNC(void, setLevelFlag)(JNIEnv *env, jclass _jcls, jlong _flag) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_setLevelFlag(
+        JNIEnv *env, jclass _jcls,
+        jlong _flag)
+{
     lvlinfo *l = &W->level;
 
     uint32_t flag = (uint32_t)_flag;
@@ -1547,7 +2255,11 @@ JNI_FUNC(void, setLevelFlag)(JNIEnv *env, jclass _jcls, jlong _flag) {
     //tms_infof("Flags after: %llu", l->flags);
 }
 
-JNI_FUNC(jboolean, getLevelFlag)(JNIEnv *env, jclass _jcls, jlong _flag) {
+extern "C" jboolean
+Java_com_bithack_principia_PrincipiaBackend_getLevelFlag(
+        JNIEnv *env, jclass _jcls,
+        jlong _flag)
+{
     lvlinfo *l = &W->level;
 
     uint32_t flag = (uint32_t)_flag;
@@ -1556,17 +2268,25 @@ JNI_FUNC(jboolean, getLevelFlag)(JNIEnv *env, jclass _jcls, jlong _flag) {
     return (jboolean)(l->flag_active(f));
 }
 
-JNI_FUNC(void, triggerSave)(JNIEnv *env, jclass _jcls, jboolean save_copy) {
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_triggerSave(
+        JNIEnv *env, jclass _jcls, jboolean save_copy)
+{
     if (save_copy)
         P.add_action(ACTION_SAVE_COPY, 0);
     else
         P.add_action(ACTION_SAVE, 0);
 }
 
-JNI_FUNC(void, openDialog)(JNIEnv *env, jclass _jcls, jint dialog_id) {
-    ui::open_dialog((int)dialog_id);
+extern "C" void
+Java_com_bithack_principia_PrincipiaBackend_triggerCreateLevel(
+        JNIEnv *env, jclass _jcls, jint level_type)
+{
+    P.add_action(ACTION_NEW_LEVEL, level_type);
 }
 
-}
+void ui::render() {}
+
+bool ui::is_blocking() { return false; }
 
 #endif

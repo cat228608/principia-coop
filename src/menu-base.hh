@@ -30,6 +30,12 @@ enum {
     BTN_PUZZLES,
     BTN_GETTING_STARTED,
 
+    /* co-op */
+    BTN_COOP,
+    BTN_COOP_HOST,
+    BTN_COOP_JOIN,
+    BTN_COOP_DISCONNECT,
+
     BTN_IGNORE
 };
 

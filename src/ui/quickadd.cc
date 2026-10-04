@@ -154,19 +154,6 @@ namespace UiQuickadd {
 
     void layout() {
         handle_do_open(&do_open, "quickadd");
-
-        // TODO: Make this a setting instead
-#if SDL_PLATFORM_ANDROID
-        bool fullscreen_quickadd = true;
-#else
-        bool fullscreen_quickadd = false;
-#endif
-
-        if (fullscreen_quickadd) {
-            ImGuiViewport *viewport = ImGui::GetMainViewport();
-            ImGui_CenterNextWindow();
-            ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x * 0.85, viewport->WorkSize.y * 0.9), ImGuiCond_Always);
-        }
         if (ImGui::BeginPopup("quickadd", POPUP_FLAGS)) {
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 ImGui::CloseCurrentPopup();
@@ -177,8 +164,6 @@ namespace UiQuickadd {
             if (ImGui::IsWindowAppearing())
                 ImGui::SetKeyboardFocusHere();
 
-            if (fullscreen_quickadd)
-                ImGui::SetNextItemWidth(-1);
             if (ImGui::InputTextWithHint(
                 "###qs-search",
                 "Search for components",
@@ -196,11 +181,7 @@ namespace UiQuickadd {
             if (ImGui::IsItemEdited())
                 search();
 
-            float area_height;
-            if (fullscreen_quickadd)
-                area_height = ImGui::GetContentRegionAvail().y;
-            else
-                area_height = ImGui::GetTextLineHeightWithSpacing() * 7.25f + ImGui::GetStyle().FramePadding.y * 2.0f;
+            const float area_height = ImGui::GetTextLineHeightWithSpacing() * 7.25f + ImGui::GetStyle().FramePadding.y * 2.0f;
             if (ImGui::BeginChild(ImGui::GetID("qsbox"), ImVec2(-FLT_MIN, area_height), ImGuiChildFlags_FrameStyle)) {
                 for (int i = 0; i < search_results.size(); i++) {
                     ImGui::PushID(i);

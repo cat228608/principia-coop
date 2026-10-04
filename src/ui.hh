@@ -72,6 +72,9 @@
 #define DIALOG_TREASURE_CHEST   160
 #define DIALOG_DECORATION       161
 #define DIALOG_SFXEMITTER_2     162
+#define DIALOG_COOP_HOST        163
+#define DIALOG_COOP_JOIN        164
+#define DIALOG_COOP_CHAT        165
 
 #define CLOSE_ALL_DIALOGS                  200
 #define CLOSE_ABSOLUTELY_ALL_DIALOGS       201
@@ -80,10 +83,10 @@
 
 #define DIALOG_PUBLISH          300
 #define DIALOG_LOGIN            301
-#define DIALOG_SANDBOX_TIPS     302
 
 #define SIGNAL_LOGIN_SUCCESS        100
 #define SIGNAL_LOGIN_FAILED         101
+#define SIGNAL_QUICKADD_REFRESH     200
 #define SIGNAL_REFRESH_BORDERS      300
 
 #define SIGNAL_REGISTER_SUCCESS     110
@@ -125,6 +128,7 @@ class ui
     static void messagef(const char *str, ...);
     static void open_dialog(int num, void *data=0);
     static void open_error_dialog(const char *error_string);
+    static void open_sandbox_tips();
     static void open_url(const char *url);
     static void emit_signal(int num, void *data=0);
     static void set_next_action(int action_id);

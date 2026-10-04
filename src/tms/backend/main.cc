@@ -1,5 +1,4 @@
 #include "main.hh"
-#include "misc.hh"
 #include "pipe.hh"
 #include "settings.hh"
 #include "version.hh"
@@ -47,8 +46,24 @@ to reproduce it, if possible.
 
 void redirect_log_output() {
 #if defined(SDL_PLATFORM_SWITCH) || (!defined(DEBUG) && !defined(SDL_PLATFORM_EMSCRIPTEN))
+    /* Two instances on one machine (co-op testing) share the same storage
+     * path and would truncate each other's run.log - and a redirected log is
+     * invisible in the terminal anyway. PRINCIPIA_LOG=<path> writes
+     * somewhere else, PRINCIPIA_LOG=- keeps everything on stdout so it can
+     * be piped or tee'd. */
+    const char *log_env = getenv("PRINCIPIA_LOG");
+
+    if (log_env && log_env[0] == '-' && log_env[1] == '\0') {
+        tms_infof("Log redirection disabled (PRINCIPIA_LOG=-)");
+        return;
+    }
+
     char logfile[1024];
-    snprintf(logfile, 1023, "%s/run.log", tms_storage_path());
+
+    if (log_env && log_env[0])
+        snprintf(logfile, 1023, "%s", log_env);
+    else
+        snprintf(logfile, 1023, "%s/run.log", tms_storage_path());
 
     tms_infof("Redirecting log output to %s", logfile);
     FILE *log = fopen(logfile, "w+");
@@ -106,12 +121,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     setlocale(LC_ALL, "C");
 #endif
 
-    bool ignore_pipe = false;
-    if (argc > 1 && strncmp(argv[1], "--ignore-pipe", 14) == 0) {
-        tms_infof("Ignoring IPC pipe.");
-        ignore_pipe = true;
-    } else
-        setup_pipe(argc, argv);
+    setup_pipe(argc, argv);
 
     const char* exedir = SDL_GetBasePath();
     tms_infof("chdirring to %s", exedir);
@@ -396,13 +406,24 @@ int mouse_button_to_pointer_id(int button) {
     }
 }
 
+#ifdef MAX_P
+#undef MAX_P
+#endif
+
+#define MAX_P 10
+
 static uint64_t finger_ids[MAX_P];
 
 static int finger_to_pointer(uint64_t finger, bool create) {
+#ifdef SDL_PLATFORM_WINDOWS
+    // Windows gives each finger tap session an unique incrementing ID that starts on each boot, so
+    // we need to keep track of them and allocate in slots that fit TMS' pointer ID system.
+
     for (int x = 0; x < MAX_P; x++) {
         // If create=true, find first empty slot
-        // else, find the slot that matches the finger ID returned from SDL
+        // else, find the slot that matches the finger ID returned from Windows
         if ((finger_ids[x] == 0 && create) || finger_ids[x] == finger) {
+            tms_infof("found %" PRIu64 " at %d", finger, x);
             finger_ids[x] = finger;
             return x;
         }
@@ -413,6 +434,10 @@ static int finger_to_pointer(uint64_t finger, bool create) {
     // Just replace the last one with this new finger ID.
     finger_ids[MAX_P-1] = finger;
     return MAX_P-1;
+#else
+    // Linux, Android - Easy, they handle finger IDs basically the way we want them to.
+    return finger - 1;
+#endif
 }
 
 int T_intercept_input(SDL_Event ev) {

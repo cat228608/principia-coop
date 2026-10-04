@@ -891,6 +891,8 @@ class game : public pscreen {
     int resume();
     int pause();
     void create_level(int type, bool empty, bool play);
+    /* co-op: re-create the level with an explicit terrain seed */
+    void coop_create_level(uint64_t seed);
     void snap_to_camera(screenshot_marker *sm);
 
     bool player_can_build();

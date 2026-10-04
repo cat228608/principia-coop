@@ -1,6 +1,7 @@
 #include "multiplayer.hh"
 #include "mp_sync.hh"
 
+#include "settings.hh"
 #include "adventure.hh"
 #include "faction.hh"
 #include "creature.hh"
@@ -17,6 +18,8 @@
 #include "widget_manager.hh"
 #include "world.hh"
 #include "chunk.hh"
+#include "cable.hh"
+#include "panel.hh"
 
 #include <SDL3/SDL.h>
 #include <tms/math/misc.h>
@@ -76,6 +79,9 @@ static std::deque<pending_msg> _inq;
 static std::map<uint32_t, uint32_t> _sig;
 static std::map<uint32_t, char> _awake;
 static std::map<uint32_t, double> _remote_touch;
+/* host, during a round: objects a client holds with the Builder */
+struct held_obj { float x, y, a; double t; };
+static std::map<uint32_t, held_obj> _held;
 static uint32_t _refollow = 0;            /* re-point the camera after a re-create */
 static bool     _need_wipe = false;       /* drop our locally generated world once */
 static uint32_t _local_avatar = 0;        /* our own character in the room */
@@ -263,6 +269,57 @@ void hud_step() {
 static bool is_streamable(entity *e);
 static bool is_player_avatar(uint32_t id);
 static void write_conn_xforms(buf *b, entity *e, entity *o);
+
+/* Attaching an object to the ground creates a connection to a terrain chunk.
+ * Chunks are generated locally on every machine and get different ids on
+ * each of them, so sending the chunk id connected the plank to nothing on
+ * the other side - or to a random object/chunk with that id, which was then
+ * moved by snap_before_connect() and crashed the host. A chunk is therefore
+ * sent by its grid position, which is the same everywhere. */
+#define MP_CHUNK_REF 0x80000000u
+
+static uint32_t conn_ref(entity *e) {
+    if (!e) return 0;
+
+    if (e->g_id == O_CHUNK) {
+        level_chunk *c = static_cast<level_chunk*>(e);
+        uint32_t x = (uint32_t)((c->pos_x + 16384) & 0x7FFF);
+        uint32_t y = (uint32_t)((c->pos_y + 16384) & 0x7FFF);
+        return MP_CHUNK_REF | (x << 15) | y;
+    }
+
+    return e->id;
+}
+
+/* true only while a chunk breaks the joints whose pixel was dug away -
+ * the only case in which a ground joint really breaks during a round */
+static bool _ground_dig = false;
+
+void set_ground_dig(bool on) { _ground_dig = on; }
+
+static bool is_chunk_ref(uint32_t ref) {
+    return ref != 0xFFFFFFFFu && (ref & MP_CHUNK_REF);
+}
+
+static entity *conn_resolve(uint32_t ref) {
+    if (!W) return 0;
+
+    if (is_chunk_ref(ref)) {
+        if (!W->cwindow) return 0;
+        int x = (int)((ref >> 15) & 0x7FFF) - 16384;
+        int y = (int)(ref & 0x7FFF) - 16384;
+        /* only a chunk that is already active here: loading or generating
+         * one from inside a network message bypasses the chunk window */
+        level_chunk *c = W->cwindow->get_chunk(x, y, true);
+        if (!c || c->load_phase < 1 || !c->get_body(0)) {
+            tms_debugf("co-op: ground chunk %d,%d is not loaded here", x, y);
+            return 0;
+        }
+        return c;
+    }
+
+    return W->get_entity_by_id(ref);
+}
 
 static bool write_entity(buf *b, entity *e) {
     if (!e || !W) return false;
@@ -546,13 +603,15 @@ static void send_snapshot(peer *p) {
         if (!c || !c->e || !c->o) continue;
 
         buf b;
-        b.w_u32(c->e->id);
-        b.w_u32(c->o->id);
+        b.w_u32(conn_ref(c->e));
+        b.w_u32(conn_ref(c->o));
         b.w_u8(c->type);
         b.w_u8(c->f[0]);
         b.w_u8(c->f[1]);
         b.w_f(c->p.x);
         b.w_f(c->p.y);
+        b.w_f(c->p_s.x);   /* apply_connect() reads p_s right after p */
+        b.w_f(c->p_s.y);
         b.w_i32(c->layer);
         b.w_f(c->max_force);
         b.w_f(c->damping);
@@ -588,6 +647,9 @@ static void write_conn_xforms(buf *b, entity *e, entity *o) {
 
 static void snap_before_connect(entity *e, float x, float y, float a, int layer) {
     if (!e || !G) return;
+
+    /* the ground never moves */
+    if (e->g_id == O_CHUNK) return;
 
     /* the group owns the transform of its members */
     if (e->gr) return;
@@ -639,8 +701,8 @@ static void apply_connect(buf *b) {
 
     if (b->err || !W || !G) return;
 
-    entity *e = W->get_entity_by_id(e_id);
-    entity *o = W->get_entity_by_id(o_id);
+    entity *e = conn_resolve(e_id);
+    entity *o = conn_resolve(o_id);
 
     if (e && o) {
         applying = true;
@@ -821,6 +883,12 @@ static void apply_xform(buf *b) {
             bd->SetAngularVelocity(0.f);
             bd->SetAwake(true);
         }
+
+        if (mode == MODE_HOST) {
+            held_obj h;
+            h.x = x; h.y = y; h.a = a; h.t = now_sec();
+            _held[id] = h;
+        }
     }
 
     e->update();
@@ -849,8 +917,11 @@ static void apply_disconnect(buf *b) {
 
     if (b->err || !W || !G) return;
 
-    entity *e = W->get_entity_by_id(a_id);
-    entity *o = W->get_entity_by_id(b_id);
+    entity *e = conn_resolve(a_id);
+    entity *o = conn_resolve(b_id);
+
+    /* walk the object, never the chunk: a chunk has many connections */
+    if (e && o && e->g_id == O_CHUNK) { entity *t = e; e = o; o = t; }
 
     if (!e || !o || !e->conn_ll) return;
 
@@ -890,6 +961,13 @@ static void apply_delete(buf *b) {
 
     entity *e = W->get_entity_by_id(id);
     if (!e) return;
+
+    /* a plug belongs to its cable, cables are removed by MSG_CABLE_DEL */
+    if (e->type == ENTITY_CABLE
+            || (e->type == ENTITY_PLUG && e->flag_active(ENTITY_IS_OWNED))) {
+        tms_debugf("co-op: not deleting cable part %u as an object", id);
+        return;
+    }
 
     /* A welded member is only removed in build mode, from the deferred
      * queue - exactly like the editor's own delete. In a running round the
@@ -1191,6 +1269,7 @@ static void process_pending_play() {
         _gxf.clear();
         _awake.clear();
         _remote_touch.clear();
+    _held.clear();
         _sig.clear();
 
         /* a layer switch that was still queued belongs to the round that
@@ -1244,7 +1323,14 @@ static input_state read_local_input() {
     {
         float mx = 0.f, my = 0.f;
 
-        if ((SDL_GetMouseState(&mx, &my) & SDL_BUTTON_LMASK) && !adventure::mining)
+        /* adventure.cc fires on pointer 1 = RIGHT button; the left button
+         * belongs to the tools (Builder, zapper), so it must never shoot */
+        /* same rule as adventure.cc: the pointer only fires in the mouse
+         * control scheme (control_type 1) without touch controls */
+        bool mouse_aim = !settings["touch_controls"]->v.b
+                      && settings["control_type"]->v.u8 == 1;
+
+        if (mouse_aim && (SDL_GetMouseState(&mx, &my) & SDL_BUTTON_RMASK) && !adventure::mining)
             in.attack = true;
     }
 
@@ -2273,6 +2359,11 @@ static uint32_t entity_signature(entity *e) {
     float saved_angle = e->_angle;
     int saved_prio = e->prio;   /* layer travels via MSG_XFORM as well */
 
+    /* An RC panel keeps its widgets (sliders, buttons...) in memory and only
+     * copies them into its properties in pre_write(). Without this, adding a
+     * slider on a panel never changed the hash and was never sent. */
+    if (e->flag_active(ENTITY_IS_CONTROL_PANEL)) e->pre_write();
+
     e->_pos = b2Vec2(0.f, 0.f);
     e->_angle = 0.f;
     e->prio = 0;
@@ -2339,8 +2430,8 @@ static uint8_t write_entity_connections(buf *b, entity *e) {
     for (size_t x = 0; x < list.size(); ++x) {
         connection *cc = list[x];
 
-        b->w_u32(cc->e->id);
-        b->w_u32(cc->o->id);
+        b->w_u32(conn_ref(cc->e));
+        b->w_u32(conn_ref(cc->o));
         b->w_u8(cc->type);
         b->w_u8(cc->f[0]);
         b->w_u8(cc->f[1]);
@@ -2370,6 +2461,63 @@ static void send_entity_update(entity *e) {
     write_entity_connections(&b, e);
 
     broadcast(MSG_ENTITY_UPDATE, b);
+}
+
+/* A settings update deletes the object and builds it again. The cables that
+ * were plugged into it would fall out (and the cable sync would then unplug
+ * them on every machine), so they are taken out first and plugged back into
+ * the new object, into the same sockets. */
+struct replug {
+    uint32_t cable_id;
+    int      x;
+    uint8_t  s;
+};
+
+static void collect_plugs(entity *old, std::vector<replug> *out) {
+    if (!W || !old) return;
+
+    for (std::set<cable*>::iterator i = W->cables.begin(); i != W->cables.end(); ++i) {
+        cable *c = *i;
+        if (!c) continue;
+
+        for (int x = 0; x < 2; ++x) {
+            plug *p = c->p[x];
+            if (!p || !p->plugged_edev || !p->s) continue;
+            if (p->plugged_edev->get_entity() != old) continue;
+
+            replug r;
+            r.cable_id = c->id;
+            r.x = x;
+            r.s = p->plugged_edev->get_socket_index(p->s);
+            out->push_back(r);
+
+            bool was = applying;
+            applying = true;
+            p->disconnect();
+            applying = was;
+        }
+    }
+}
+
+static void restore_plugs(entity *e, const std::vector<replug> &list) {
+    if (!W || !e || list.empty()) return;
+
+    edevice *ed = e->get_edevice();
+    if (!ed) return;
+
+    for (size_t n = 0; n < list.size(); ++n) {
+        cable *c = 0;
+        for (std::set<cable*>::iterator i = W->cables.begin(); i != W->cables.end(); ++i)
+            if (*i && (*i)->id == list[n].cable_id) { c = *i; break; }
+        if (!c || !c->p[list[n].x]) continue;
+
+        bool was = applying;
+        applying = true;
+        c->p[list[n].x]->entity::set_layer(e->get_layer());
+        if (!c->connect(c->p[list[n].x], ed, list[n].s))
+            tms_warnf("co-op: could not plug cable %u back into %u", list[n].cable_id, e->id);
+        applying = was;
+    }
 }
 
 static void apply_entity_update(buf *b) {
@@ -2417,6 +2565,9 @@ static void apply_entity_update(buf *b) {
         return;
     }
 
+    std::vector<replug> replugs;
+    if (old) collect_plugs(old, &replugs);
+
     /* keep the object where it currently is, only the settings changed */
     if (old) {
         e->_pos = old->get_position();
@@ -2431,6 +2582,7 @@ static void apply_entity_update(buf *b) {
     }
 
     add_remote_entity(e);
+    restore_plugs(e, replugs);
 
     if (_refollow == id) {
         _refollow = 0;
@@ -2604,6 +2756,7 @@ void on_world_teardown() {
     _gxf.clear();
     _awake.clear();
     _remote_touch.clear();
+    _held.clear();
     _refollow = 0;
 
     /* queued messages refer to objects of the level that is being thrown
@@ -2631,7 +2784,10 @@ void on_world_teardown() {
  * whole per-level sync state has to go. Object ids restart from 1 after a
  * rebuild, so keeping the caches would make us apply a peer's robot state to
  * a random plank. */
+static void reset_cables_panels();
+
 void on_world_reset() {
+    reset_cables_panels();
     _spawn_out.clear();
     _terrain_pending.clear();
     sync::reset();
@@ -2675,6 +2831,12 @@ static bool is_streamable(entity *e) {
      * exactly that reason. Sending one as an object produced garbage on the
      * other side; groups are rebuilt locally from the connections instead. */
     if (e->type == ENTITY_GROUP) return false;
+
+    /* Cables and their plugs are not saved like objects either (the level
+     * keeps them in their own list). They are synced by sync_cables() with
+     * MSG_CABLE, never as a spawned object. */
+    if (e->type == ENTITY_CABLE) return false;
+    if (e->type == ENTITY_PLUG && e->flag_active(ENTITY_IS_OWNED)) return false;
 
     /* An object welded into a group is owned by that group. Deleting or
      * re-creating a member (which is how a settings change is applied) makes
@@ -2764,6 +2926,7 @@ static void wipe_local_world() {
     _sig.clear();
     _awake.clear();
     _remote_touch.clear();
+    _held.clear();
 
     /* _local_avatar deliberately survives: the host already told us which
      * character is ours and resolve_local_avatar() re-binds it */
@@ -2794,6 +2957,10 @@ void on_runtime_spawn(entity *e) {
 
     /* re-loaded from the level by the preloader: everyone has it already */
     if (_session_playing && _level_ids.count(e->id)) return;
+
+    /* the same, for objects of chunks that were not active at round start */
+    if (_session_playing && W && W->cwindow
+            && W->cwindow->preloader.has_pending_entity(e->id)) return;
 
     /* HOST AS AUTHORITY: whatever the client's own simulation produces in a
      * round (machine output, loot, wandering NPCs) is thrown away; the host
@@ -3080,6 +3247,21 @@ static void send_roster() {
     broadcast(MSG_PLAYERS, b);
 }
 
+struct cable_sig {
+    uint8_t  ctype;
+    uint8_t  moveable;
+    float    extra;
+    uint32_t eid[2];
+    uint8_t  s[2];
+    float    px[2], py[2];
+};
+static bool read_cable_msg(buf *b, uint32_t *id, cable_sig *s);
+static void apply_cable(uint32_t id, const cable_sig &s);
+static void apply_cable_del(uint32_t id);
+static void apply_panel(buf *b);
+static void apply_robot_cfg(buf *b);
+static void apply_moveable(buf *b);
+
 static void handle_message(uint8_t type, buf *b, peer *from) {
     /* The host owns the world: its streams are only ever accepted from the
      * host, never from a client. */
@@ -3277,6 +3459,7 @@ static void handle_message(uint8_t type, buf *b, peer *from) {
                 _sig.clear();
                 _awake.clear();
                 _remote_touch.clear();
+    _held.clear();
                 _local_avatar = 0;
                 _assigned_avatar = 0;
                 _avatars.clear();
@@ -3366,6 +3549,17 @@ static void handle_message(uint8_t type, buf *b, peer *from) {
             /* part of the level: our own preloader will load it, creating it
              * here as well would put two objects under one id (crash) */
             if (_session_playing && _level_ids.count(e->id)) {
+                delete e;
+                break;
+            }
+
+            /* the round restarts the level chunk by chunk: an object in a chunk
+             * that is not loaded yet is neither in the world nor in
+             * _level_ids, but the preloader will create it later under the
+             * same id. Creating the host's copy now gives a duplicate id. */
+            if (_session_playing && W->cwindow
+                    && W->cwindow->preloader.has_pending_entity(e->id)) {
+                tms_infof("co-op: object %u is still in the preloader, not spawned twice", e->id);
                 delete e;
                 break;
             }
@@ -3640,6 +3834,48 @@ static void handle_message(uint8_t type, buf *b, peer *from) {
 
             if (!apply_terrain_px(t))
                 _terrain_pending.push_back(t);
+        } break;
+
+        case MSG_CABLE: {
+            buf copy = *b;
+            uint32_t id; cable_sig s;
+            if (!read_cable_msg(b, &id, &s)) break;
+            apply_cable(id, s);
+
+            if (mode == MODE_HOST)
+                broadcast(MSG_CABLE, copy, from ? from->id : -1);
+        } break;
+
+        case MSG_CABLE_DEL: {
+            buf copy = *b;
+            uint32_t id = b->r_u32();
+            if (b->err) break;
+            apply_cable_del(id);
+
+            if (mode == MODE_HOST)
+                broadcast(MSG_CABLE_DEL, copy, from ? from->id : -1);
+        } break;
+
+        case MSG_MOVEABLE: {
+            buf copy = *b;
+            apply_moveable(b);
+
+            if (mode == MODE_HOST)
+                broadcast(MSG_MOVEABLE, copy, from ? from->id : -1);
+        } break;
+
+        case MSG_ROBOT_CFG: {
+            buf copy = *b;
+            apply_robot_cfg(b);
+
+            if (mode == MODE_HOST)
+                broadcast(MSG_ROBOT_CFG, copy, from ? from->id : -1);
+        } break;
+
+        case MSG_PANEL: {
+            /* only the host simulates, so only the host applies it */
+            if (mode != MODE_HOST || !from) break;
+            apply_panel(b);
         } break;
 
         default:
@@ -3979,6 +4215,7 @@ void shutdown(const char *reason) {
     _sig.clear();
     _awake.clear();
     _remote_touch.clear();
+    _held.clear();
     _refollow = 0;
     _need_wipe = false;
     _roster_count = 0;
@@ -3998,6 +4235,36 @@ void shutdown(const char *reason) {
 }
 
 /* ------------------------------------------------------------------ step */
+
+static void hold_remote() {
+    if (_held.empty()) return;
+    if (!W || mode != MODE_HOST || W->is_paused()) { _held.clear(); return; }
+
+    double t = now_sec();
+
+    for (std::map<uint32_t, held_obj>::iterator it = _held.begin(); it != _held.end(); ) {
+        entity *e = W->get_entity_by_id(it->first);
+
+        /* no packet for a while: the client let go, physics takes over */
+        if (!e || e->gr || t - it->second.t > 0.25) {
+            _held.erase(it++);
+            continue;
+        }
+
+        applying = true;
+        e->set_position(it->second.x, it->second.y);
+        e->set_angle(it->second.a);
+        for (int bi = 0; bi < (int)e->get_num_bodies(); ++bi) {
+            b2Body *bd = e->get_body(bi);
+            if (!bd) continue;
+            bd->SetLinearVelocity(b2Vec2(0.f, 0.f));
+            bd->SetAngularVelocity(0.f);
+            bd->SetAwake(true);
+        }
+        applying = false;
+        ++it;
+    }
+}
 
 static void sync_xforms() {
     if (!W || !G || _loading) return;
@@ -4038,7 +4305,10 @@ static void sync_xforms() {
                    || (c->second.layer != l);
         }
 
-        if (!changed) continue;
+        /* during a round an object in our hand is resent even when it does
+         * not move: otherwise the host stops getting updates and its
+         * gravity drops the object we are holding in the air */
+        if (!changed && !only_dragged) continue;
 
         xform_cache nc;
         nc.x = p.x;
@@ -4084,6 +4354,482 @@ static void disable_avatar_roaming() {
         if (_peers[x]) no_roam(_peers[x]->avatar_id);
 }
 
+/* ======================================================================== */
+/*                cables (build mode) and RC panels (round)                 */
+/* ======================================================================== */
+
+/* Cables are not regular entities: the editor creates them in many places
+ * (quickplug, dragging from the menu, unplugging...) and none of those go
+ * through the normal spawn path. Instead of hooking every one of them, the
+ * cable set of the world is compared with what the other side already knows
+ * a few times per second while building. The cable keeps its own id (every
+ * machine allocates ids from its own block), so nothing new is invented. */
+
+/* struct cable_sig is declared above handle_message() */
+
+static std::map<uint32_t, cable_sig> _cable_known;
+static bool   _cable_seeded = false;
+static double _cable_last_scan = 0.0;
+
+static bool cable_sig_eq(const cable_sig &a, const cable_sig &b) {
+    if (a.ctype != b.ctype || a.moveable != b.moveable) return false;
+    if (std::fabs(a.extra - b.extra) > 0.01f) return false;
+    for (int x = 0; x < 2; ++x) {
+        if (a.eid[x] != b.eid[x] || a.s[x] != b.s[x]) return false;
+        if (!a.eid[x] && (std::fabs(a.px[x]-b.px[x]) > 0.05f || std::fabs(a.py[x]-b.py[x]) > 0.05f))
+            return false;
+    }
+    return true;
+}
+
+static cable *find_cable(uint32_t id) {
+    if (!W) return 0;
+    for (std::set<cable*>::iterator i = W->cables.begin(); i != W->cables.end(); ++i)
+        if (*i && (*i)->id == id) return *i;
+    return 0;
+}
+
+static void read_cable_sig(cable *c, cable_sig *s) {
+    s->ctype = (uint8_t)c->ctype;
+    s->moveable = c->is_moveable() ? 1 : 0;
+    s->extra = c->extra_length;
+    for (int x = 0; x < 2; ++x) {
+        plug *p = c->p[x];
+        s->eid[x] = 0; s->s[x] = 0; s->px[x] = 0.f; s->py[x] = 0.f;
+        if (!p) continue;
+        if (p->plugged_edev && p->s && p->plugged_edev->get_entity()) {
+            s->eid[x] = p->plugged_edev->get_entity()->id;
+            s->s[x] = p->plugged_edev->get_socket_index(p->s);
+        } else {
+            b2Vec2 pos = p->get_position();
+            s->px[x] = pos.x; s->py[x] = pos.y;
+        }
+    }
+}
+
+static void write_cable_sig(buf *b, uint32_t id, const cable_sig &s) {
+    b->w_u32(id);
+    b->w_u8(s.ctype);
+    b->w_u8(s.moveable);
+    b->w_f(s.extra);
+    for (int x = 0; x < 2; ++x) {
+        b->w_u32(s.eid[x]);
+        b->w_u8(s.s[x]);
+        b->w_f(s.px[x]);
+        b->w_f(s.py[x]);
+    }
+}
+
+static bool read_cable_msg(buf *b, uint32_t *id, cable_sig *s) {
+    *id = b->r_u32();
+    s->ctype = b->r_u8();
+    s->moveable = b->r_u8();
+    s->extra = b->r_f();
+    for (int x = 0; x < 2; ++x) {
+        s->eid[x] = b->r_u32();
+        s->s[x] = b->r_u8();
+        s->px[x] = b->r_f();
+        s->py[x] = b->r_f();
+    }
+    return !b->err && *id != 0;
+}
+
+static void apply_cable(uint32_t id, const cable_sig &s) {
+    if (!W || !G || !W->is_paused()) return;
+    if (s.ctype != CABLE_RED && s.ctype != CABLE_BLACK && s.ctype != CABLE_BLUE) return;
+
+    cable *c = find_cable(id);
+    bool created = false;
+
+    if (c && c->ctype != s.ctype) return;
+
+    if (!c) {
+        p_gid gid = (s.ctype == CABLE_RED ? O_SIGNAL_CABLE
+                  : (s.ctype == CABLE_BLACK ? O_POWER_CABLE : O_INTERFACE_CABLE));
+        c = (cable*)of::create_with_id(gid, id);
+        if (!c) return;
+        c->construct();
+        c->on_pause();
+        created = true;
+    }
+
+    applying = true;
+
+    c->extra_length = s.extra;
+    c->set_moveable(s.moveable != 0);
+
+    for (int x = 0; x < 2; ++x) {
+        plug *p = c->p[x];
+        if (!p) continue;
+
+        uint32_t cur_e = 0; uint8_t cur_s = 0;
+        if (p->plugged_edev && p->s && p->plugged_edev->get_entity()) {
+            cur_e = p->plugged_edev->get_entity()->id;
+            cur_s = p->plugged_edev->get_socket_index(p->s);
+        }
+
+        if (cur_e == s.eid[x] && cur_s == s.s[x] && !created) {
+            if (!s.eid[x]) p->set_position(s.px[x], s.py[x]);
+            continue;
+        }
+
+        if (p->plugged_edev) p->disconnect();
+
+        if (s.eid[x]) {
+            entity *e = W->get_entity_by_id(s.eid[x]);
+            edevice *ed = (e && e->type != ENTITY_PLUG && e->type != ENTITY_CABLE) ? e->get_edevice() : 0;
+            if (ed) {
+                p->entity::set_layer(e->get_layer());
+                if (!c->connect(p, ed, s.s[x]))
+                    tms_warnf("co-op: cable %u could not be plugged into %u", id, s.eid[x]);
+            } else {
+                tms_warnf("co-op: cable %u: object %u not found", id, s.eid[x]);
+            }
+        } else {
+            p->set_position(s.px[x], s.py[x]);
+        }
+    }
+
+    if (created) {
+        W->add(c);
+        G->add_entity(c);
+    }
+
+    applying = false;
+
+    /* remember what we got, so the scan does not send it straight back */
+    cable_sig now;
+    read_cable_sig(c, &now);
+    _cable_known[id] = now;
+}
+
+static void apply_cable_del(uint32_t id) {
+    _cable_known.erase(id);
+    if (!W || !G || !W->is_paused()) return;
+    cable *c = find_cable(id);
+    if (c) safe_delete_entity(c);
+}
+
+static void sync_cables() {
+    if (!W || !G || _loading) return;
+
+    if (!W->is_paused()) return;   /* rounds start from the saved level anyway */
+
+    double now = SDL_GetTicks() / 1000.0;
+    if (_cable_seeded && now - _cable_last_scan < 0.2) return;
+    _cable_last_scan = now;
+
+    std::set<uint32_t> seen;
+
+    for (std::set<cable*>::iterator i = W->cables.begin(); i != W->cables.end(); ++i) {
+        cable *c = *i;
+        if (!c || !c->id) continue;
+
+        cable_sig s;
+        read_cable_sig(c, &s);
+        seen.insert(c->id);
+
+        std::map<uint32_t, cable_sig>::iterator k = _cable_known.find(c->id);
+        bool changed = (k == _cable_known.end() || !cable_sig_eq(k->second, s));
+        _cable_known[c->id] = s;
+
+        /* the first pass only learns what was loaded with the level */
+        if (!_cable_seeded || !changed) continue;
+
+        buf b;
+        write_cable_sig(&b, c->id, s);
+        broadcast(MSG_CABLE, b);
+    }
+
+    for (std::map<uint32_t, cable_sig>::iterator k = _cable_known.begin(); k != _cable_known.end(); ) {
+        if (seen.count(k->first)) { ++k; continue; }
+
+        if (_cable_seeded) {
+            buf b;
+            b.w_u32(k->first);
+            broadcast(MSG_CABLE_DEL, b);
+        }
+        _cable_known.erase(k++);
+    }
+
+    _cable_seeded = true;
+}
+
+/* RC panels: physics is the host's, so a slider moved on a client did
+ * nothing. The client simply sends the widget values of every panel it
+ * changed and the host sets them as if its own player had moved them. */
+
+struct panel_vals {
+    uint8_t n;
+    float   v[PANEL_MAX_WIDGETS][2];
+};
+
+static std::map<uint32_t, panel_vals> _panel_sent;
+static double _panel_last = 0.0;
+
+static bool is_panel_gid(p_gid g) {
+    return g == O_RC_BASIC || g == O_RC_IO3 || g == O_RC_MONSTRO || g == O_RC_MICRO;
+}
+
+static void sync_panels() {
+    if (mode != MODE_CLIENT || !W || !_session_playing || W->is_paused()) return;
+
+    double now = SDL_GetTicks() / 1000.0;
+    if (now - _panel_last < MP_SYNC_PANEL_INTERVAL) return;
+    _panel_last = now;
+
+    for (std::map<uint32_t, entity*>::iterator i = W->all_entities.begin();
+            i != W->all_entities.end(); ++i) {
+        entity *e = i->second;
+        if (!e || !is_panel_gid(e->g_id)) continue;
+
+        panel *p = static_cast<panel*>(e);
+        panel_vals v;
+        v.n = (uint8_t)std::min(std::max(p->num_widgets, 0), PANEL_MAX_WIDGETS);
+        for (int x = 0; x < v.n; ++x) {
+            v.v[x][0] = p->widgets[x].value[0];
+            v.v[x][1] = p->widgets[x].value[1];
+        }
+
+        std::map<uint32_t, panel_vals>::iterator k = _panel_sent.find(e->id);
+        if (k != _panel_sent.end()) {
+            bool same = (k->second.n == v.n);
+            for (int x = 0; same && x < v.n; ++x)
+                if (std::fabs(k->second.v[x][0]-v.v[x][0]) > 0.0001f
+                        || std::fabs(k->second.v[x][1]-v.v[x][1]) > 0.0001f)
+                    same = false;
+            if (same) continue;
+        } else {
+            /* first look at this panel: only remember the start values */
+            _panel_sent[e->id] = v;
+            continue;
+        }
+
+        _panel_sent[e->id] = v;
+
+        buf b;
+        b.w_u32(e->id);
+        b.w_u8(v.n);
+        for (int x = 0; x < v.n; ++x) {
+            b.w_f(v.v[x][0]);
+            b.w_f(v.v[x][1]);
+        }
+        broadcast(MSG_PANEL, b);
+    }
+}
+
+static void apply_panel(buf *b) {
+    uint32_t id = b->r_u32();
+    uint8_t n = b->r_u8();
+    if (b->err || n > PANEL_MAX_WIDGETS || !W) return;
+
+    float v[PANEL_MAX_WIDGETS][2];
+    for (int x = 0; x < n; ++x) {
+        v[x][0] = b->r_f();
+        v[x][1] = b->r_f();
+    }
+    if (b->err) return;
+
+    entity *e = W->get_entity_by_id(id);
+    if (!e || !is_panel_gid(e->g_id)) return;
+
+    panel *p = static_cast<panel*>(e);
+    int cnt = std::min((int)n, p->num_widgets);
+    for (int x = 0; x < cnt; ++x) {
+        if (std::isnan(v[x][0]) || std::isnan(v[x][1])) continue;
+        p->widgets[x].value[0] = v[x][0];
+        p->widgets[x].value[1] = v[x][1];
+    }
+}
+
+/* Robots: characters are never re-created to apply settings (they are the
+ * players themselves), so the editor's robot dialog never reached anyone.
+ * The dialog only writes a few properties and asks the robot to reload, so
+ * exactly those properties are compared and sent, and the receiver does what
+ * the dialog does. */
+
+/* "Moveable when playing" (the lock-to-ground button): the editor only flips
+ * a flag on the object, nothing else changes. The settings scan skips welded
+ * members and objects held by the other player, so the flag got lost and the
+ * plank fell on the host. It gets its own tiny message now, for every object
+ * kind, grouped or not. */
+
+static std::map<uint32_t, uint8_t> _move_known;
+static bool   _move_seeded = false;
+static double _move_last_scan = 0.0;
+
+static void sync_moveable() {
+    if (!W || !G || _loading || !W->is_paused()) return;
+
+    double now = SDL_GetTicks() / 1000.0;
+    if (_move_seeded && now - _move_last_scan < 0.2) return;
+    _move_last_scan = now;
+
+    for (std::map<uint32_t, entity*>::iterator i = W->all_entities.begin();
+            i != W->all_entities.end(); ++i) {
+        entity *e = i->second;
+        if (!e || !is_streamable(e)) continue;
+
+        uint8_t m = e->is_moveable() ? 1 : 0;
+
+        std::map<uint32_t, uint8_t>::iterator k = _move_known.find(e->id);
+        bool known = (k != _move_known.end());
+        bool changed = (!known || k->second != m);
+        _move_known[e->id] = m;
+
+        /* the first pass only learns what came with the level; new objects
+         * arrive with their flag inside the spawn message */
+        if (_move_seeded && known && changed) {
+            buf b;
+            b.w_u32(e->id);
+            b.w_u8(m);
+            broadcast(MSG_MOVEABLE, b);
+        }
+    }
+
+    _move_seeded = true;
+}
+
+static void apply_moveable(buf *b) {
+    uint32_t id = b->r_u32();
+    uint8_t  m  = b->r_u8();
+    if (b->err || !W || !G || !W->is_paused()) return;
+
+    entity *e = W->get_entity_by_id(id);
+    if (!e) return;
+
+    applying = true;
+    e->set_moveable(m != 0);
+    applying = false;
+
+    _move_known[id] = m ? 1 : 0;
+
+    /* the flag is part of the saved object, keep the settings scan quiet */
+    if (_sig.find(id) != _sig.end())
+        _sig[id] = entity_signature(e);
+
+    if (G->selection.e == e && G->wdg_moveable)
+        G->wdg_moveable->faded = !e->is_moveable();
+}
+
+struct robot_cfg {
+    uint8_t     v[8];      /* faction, dir, head, head eq, back, front, feet, bolts */
+    std::string items;     /* ROBOT_PROPERTY_EQUIPMENT, "id;id;..." */
+
+    bool operator==(const robot_cfg &o) const {
+        return memcmp(v, o.v, sizeof(v)) == 0 && items == o.items;
+    }
+};
+
+static std::map<uint32_t, robot_cfg> _robot_known;
+static bool   _robot_seeded = false;
+static double _robot_last_scan = 0.0;
+
+static const uint8_t _robot_props[8] = {
+    ROBOT_PROPERTY_FACTION, ROBOT_PROPERTY_DIR, ROBOT_PROPERTY_HEAD,
+    ROBOT_PROPERTY_HEAD_EQUIPMENT, ROBOT_PROPERTY_BACK, ROBOT_PROPERTY_FRONT,
+    ROBOT_PROPERTY_FEET, ROBOT_PROPERTY_BOLT_SET,
+};
+
+static bool is_cfg_robot(entity *e) {
+    return e && e->flag_active(ENTITY_IS_ROBOT)
+        && e->num_properties > ROBOT_PROPERTY_BOLT_SET;
+}
+
+static void read_robot_cfg(entity *e, robot_cfg *c) {
+    for (int x = 0; x < 8; ++x)
+        c->v[x] = (uint8_t)e->properties[_robot_props[x]].v.i8;
+
+    const property &p = e->properties[ROBOT_PROPERTY_EQUIPMENT];
+    c->items = (p.v.s.buf && p.v.s.len) ? std::string(p.v.s.buf, strnlen(p.v.s.buf, p.v.s.len)) : std::string();
+}
+
+static void send_robot_cfg(uint32_t id, const robot_cfg &c) {
+    buf b;
+    b.w_u32(id);
+    for (int x = 0; x < 8; ++x) b.w_u8(c.v[x]);
+    b.w_str(c.items.c_str());
+    broadcast(MSG_ROBOT_CFG, b);
+}
+
+static void sync_robots() {
+    if (!W || !G || _loading || !W->is_paused()) return;
+
+    double now = SDL_GetTicks() / 1000.0;
+    if (_robot_seeded && now - _robot_last_scan < 0.25) return;
+    _robot_last_scan = now;
+
+    for (std::map<uint32_t, entity*>::iterator i = W->all_entities.begin();
+            i != W->all_entities.end(); ++i) {
+        entity *e = i->second;
+        if (!is_cfg_robot(e)) continue;
+
+        robot_cfg c;
+        read_robot_cfg(e, &c);
+
+        std::map<uint32_t, robot_cfg>::iterator k = _robot_known.find(e->id);
+        bool changed = (k == _robot_known.end() || !(k->second == c));
+        _robot_known[e->id] = c;
+
+        /* the first pass only learns what came with the level */
+        if (_robot_seeded && changed)
+            send_robot_cfg(e->id, c);
+    }
+
+    _robot_seeded = true;
+}
+
+static void apply_robot_cfg(buf *b) {
+    uint32_t id = b->r_u32();
+    robot_cfg c;
+    for (int x = 0; x < 8; ++x) c.v[x] = b->r_u8();
+    c.items = b->r_str();
+    if (b->err || !W || !G || !W->is_paused()) return;
+
+    entity *e = W->get_entity_by_id(id);
+    if (!is_cfg_robot(e)) return;
+
+    /* the same limits the robot dialog uses */
+    c.v[0] = (uint8_t)std::min((int)c.v[0], NUM_FACTIONS - 1);
+    c.v[1] = (uint8_t)std::min((int)c.v[1], 2);
+    c.v[2] = (uint8_t)std::min((int)c.v[2], NUM_HEAD_TYPES - 1);
+    c.v[3] = (uint8_t)std::min((int)c.v[3], NUM_HEAD_EQUIPMENT_TYPES - 1);
+    c.v[4] = (uint8_t)std::min((int)c.v[4], NUM_BACK_EQUIPMENT_TYPES - 1);
+    c.v[5] = (uint8_t)std::min((int)c.v[5], NUM_FRONT_EQUIPMENT_TYPES - 1);
+    c.v[6] = (uint8_t)std::min((int)c.v[6], NUM_FEET_TYPES - 1);
+    c.v[7] = (uint8_t)std::min((int)c.v[7], NUM_BOLT_SETS - 1);
+    if (c.items.size() > 1024) return;
+
+    applying = true;
+
+    for (int x = 0; x < 8; ++x)
+        e->properties[_robot_props[x]].v.i8 = c.v[x];
+    e->set_property(ROBOT_PROPERTY_EQUIPMENT, c.items.c_str());
+
+    robot_base *r = static_cast<robot_base*>(e);
+    r->set_faction(c.v[0]);
+    if (c.v[1] == 1)      r->set_i_dir(DIR_LEFT);
+    else if (c.v[1] == 2) r->set_i_dir(DIR_RIGHT);
+    else                  r->set_i_dir(0.f);
+
+    /* exactly what the robot dialog does after "Apply" */
+    W->add_action(e->id, ACTION_CALL_ON_LOAD);
+
+    applying = false;
+
+    _robot_known[id] = c;
+}
+
+static void reset_cables_panels() {
+    _move_known.clear();
+    _move_seeded = false;
+    _robot_known.clear();
+    _robot_seeded = false;
+    _cable_known.clear();
+    _cable_seeded = false;
+    _panel_sent.clear();
+}
+
 void step() {
     hud_step();
 
@@ -4093,6 +4839,10 @@ void step() {
     process_client_doomed();
     sync_tools();
     flush_spawns();
+    sync_cables();
+    sync_panels();
+    sync_robots();
+    sync_moveable();
     process_terrain_pending();
 
     /* The layer request is no longer latched here: adventure.cc performs the
@@ -4309,6 +5059,7 @@ void step() {
     if (mode == MODE_CLIENT && _id_base && of::_id < _id_base)
         of::_id = _id_base;
 
+    hold_remote();
     sync_xforms();
     sync_group_xforms();
     sync_entity_settings();
@@ -4385,8 +5136,8 @@ void on_local_connection(connection *c, int option) {
     if (!local_changes_are_authoritative()) return;
 
     buf b;
-    b.w_u32(c->e->id);
-    b.w_u32(c->o->id);
+    b.w_u32(conn_ref(c->e));
+    b.w_u32(conn_ref(c->o));
     b.w_u8(c->type);
     b.w_u8(c->f[0]);
     b.w_u8(c->f[1]);
@@ -4421,7 +5172,20 @@ static bool user_is_acting_on(uint32_t id) {
     return G->interacting_with(e) != 0;
 }
 
+static void send_disconnect(uint32_t a, uint32_t bb, uint32_t ra, uint32_t rb);
+
 void on_local_disconnect(uint32_t a, uint32_t bb) {
+    send_disconnect(a, bb, a, bb);
+}
+
+/* the terrain chunks are not in all_entities and have different ids on
+ * every machine, so the objects themselves are needed to describe them */
+void on_local_disconnect_ents(entity *ea, entity *eb) {
+    if (!ea || !eb) return;
+    send_disconnect(ea->id, eb->id, conn_ref(ea), conn_ref(eb));
+}
+
+static void send_disconnect(uint32_t a, uint32_t bb, uint32_t ra, uint32_t rb) {
     if (mode == MODE_OFF || applying) return;
     if (!local_changes_are_authoritative()) return;
 
@@ -4430,13 +5194,21 @@ void on_local_disconnect(uint32_t a, uint32_t bb) {
 
     /* during a round the client's physics is only visual: a joint that
      * breaks there by itself must not break the real one on the host */
-    if (mode == MODE_CLIENT && _session_playing
+    /* ...except a joint to the ground: it only breaks when the terrain
+     * under it is dug away, and the digging itself is synced - without this
+     * the plank fell on one screen and hung in the air on the other */
+    /* only when the terrain was really dug away: unloading a chunk,
+     * reloading the level or a joint that the client's visual physics
+     * tears off must never break the host's joint */
+    bool ground = _ground_dig && (is_chunk_ref(ra) || is_chunk_ref(rb));
+
+    if (mode == MODE_CLIENT && _session_playing && !ground
         && !user_is_acting_on(a) && !user_is_acting_on(bb))
         return;
 
     buf b;
-    b.w_u32(a);
-    b.w_u32(bb);
+    b.w_u32(ra);
+    b.w_u32(rb);
     broadcast(MSG_DISCONNECT, b);
 }
 

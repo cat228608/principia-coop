@@ -1,4 +1,5 @@
 #include "entity.hh"
+#include "multiplayer.hh"
 #include "world.hh"
 #include "group.hh"
 #include "gear.hh"
@@ -965,6 +966,11 @@ void entity::remove_connection(connection *cr) {
 }
 
 void entity::destroy_connection(connection *cr) {
+    /* co-op: breaking a joint has to reach the other player, otherwise one
+     * side keeps a plank welded on that the other side already loosened */
+    if (cr && cr->e && cr->o && mp::is_syncing())
+        mp::on_local_disconnect_ents(cr->e, cr->o);
+
     connection *c = this->conn_ll;
     connection **cc = &this->conn_ll;
 
@@ -1059,6 +1065,15 @@ bool entity::compatible_with(entity *o) {
 
 void entity::disconnect_all() {
     connection *c = this->conn_ll;
+
+    /* co-op: report every joint we are about to break (see
+     * destroy_connection) before the list is unlinked */
+    if (mp::is_syncing()) {
+        for (connection *s = c; s; s = s->get_next(this)) {
+            if (s->fixed || !s->e || !s->o) continue;
+            mp::on_local_disconnect_ents(s->e, s->o);
+        }
+    }
 
     if (c) {
         do {

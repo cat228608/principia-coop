@@ -608,12 +608,22 @@ static void apply_shot(buf *b) {
 
     if (b->err) return;
 
+    /* A shot can arrive while this side is still loading the level or is
+     * paused (start of a round, back to build mode). The shotgun creates
+     * its 8 pellets through game::emit() and game::timed_absorb(), and both
+     * abort the game when the world is paused - that was the crash. */
+    if (!W || !G || W->is_paused() || !mp::session_playing()) return;
+
     /* our own shot was already fired locally by the game - replaying the
      * echo of it would fire twice per click */
     if (id == glue::local_avatar()) return;
 
     creature *c = creature_by_id(id);
     if (!c) return;
+
+    /* a body that is not built (yet) or a dead character can not shoot -
+     * the shotgun pushes the body back and reads its velocity */
+    if (!c->body || !c->get_body(0) || c->is_dead()) return;
 
     robot_parts::weapon *wp = c->get_weapon();
 
